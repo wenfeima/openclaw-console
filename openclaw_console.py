@@ -9,7 +9,12 @@ import urllib.request
 
 # ============ 常量 ============
 # 路径配置（paths.json 可自定义，重装系统后一键复原的依据）
-_PATHS_CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'paths.json')
+# PyInstaller onefile 下 __file__ 指向临时解压目录，写入会随进程退出丢失，
+# 故固定状态目录用真实路径（paths.json 所在目录）；源码运行则用脚本目录。
+_BASE_DIR = r'L:\OpenClaw\OpenClawData\console'
+if not os.path.isdir(_BASE_DIR):
+    _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_PATHS_CFG = os.path.join(_BASE_DIR, 'paths.json')
 _DEFAULT_PATHS = {
     'llama_dir':      r'L:\OpenClaw\llama',
     'comfy_root':     r'L:\OpenClaw\ComfyUI',
@@ -22,8 +27,14 @@ _DEFAULT_PATHS = {
 def _load_paths():
     p = dict(_DEFAULT_PATHS)
     try:
-        if os.path.isfile(_PATHS_CFG):
-            with io.open(_PATHS_CFG, 'r', encoding='utf-8') as f:
+        cfg = _PATHS_CFG
+        if not os.path.isfile(cfg):
+            # onefile 打包时 __file__ 指向临时解压目录，内置有 paths.json 快照可回退
+            alt = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'paths.json')
+            if os.path.isfile(alt):
+                cfg = alt
+        if os.path.isfile(cfg):
+            with io.open(cfg, 'r', encoding='utf-8') as f:
                 p.update(json.load(f))
     except Exception:
         pass
@@ -87,7 +98,7 @@ LOG_DIR    = r'L:\OpenClaw\OpenClawData\console\logs'
 LLAMA_LOG  = os.path.join(LOG_DIR, 'llama.log')
 COMFY_LOG  = os.path.join(LOG_DIR, 'comfyui.log')
 
-HW_PROFILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'hw_profile.json')
+HW_PROFILE = os.path.join(_BASE_DIR, 'hw_profile.json')
 
 def detect_hardware():
     """检测 GPU 显存 / 物理内存 / CPU 核数"""
@@ -375,8 +386,8 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title('OpenClaw 控制台 v2.2')
-        root.geometry('640x440')
-        root.minsize(560, 380)
+        root.geometry('980x540')
+        root.minsize(760, 440)
         root.configure(bg='#2b2b2b')
 
         self.models = list_models()
@@ -426,7 +437,16 @@ class App:
         style.configure('Panel.TLabel', background=c['panel'], foreground=c['fg'], font=('Microsoft YaHei UI', 10))
         style.configure('Dim.TLabel', background=c['panel'], foreground=c['dim'], font=('Microsoft YaHei UI', 9))
         style.configure('TButton', font=('Microsoft YaHei UI', 10), padding=(10, 4))
-        style.configure('Accent.TButton', background=c['accent'], foreground='white', font=('Microsoft YaHei UI', 10, 'bold'), padding=(12, 5))
+        # 顶栏小按钮（日志/启动所有/关闭所有）
+        style.configure('Top.TButton', font=('Microsoft YaHei UI', 9), padding=(6, 1))
+        style.configure('TopAccent.TButton', background='#1f883d', foreground='white',
+                        font=('Microsoft YaHei UI', 9, 'bold'), padding=(8, 1))
+        style.configure('TopStop.TButton', background='#7a3a35', foreground='white',
+                        font=('Microsoft YaHei UI', 9), padding=(6, 1))
+        style.map('Top.TButton', background=[('active', '#4f4f4f')])
+        style.map('TopAccent.TButton', background=[('active', '#2ea043')])
+        style.map('TopStop.TButton', background=[('active', '#93433d')])
+        style.configure('Accent.TButton', background='#1f883d', foreground='white', font=('Microsoft YaHei UI', 10, 'bold'), padding=(12, 5))
         style.configure('Stop.TButton', background='#7a3a35', foreground='white', font=('Microsoft YaHei UI', 10), padding=(10, 4))
         style.configure('TCombobox', fieldbackground='#3a3a3a', background='#3a3a3a', foreground='#e8e8e8',
                         arrowcolor='#e8e8e8', font=('Microsoft YaHei UI', 10))
@@ -441,7 +461,7 @@ class App:
                   selectbackground=[('readonly', '#d0d0d0')],
                   selectforeground=[('readonly', '#000000')])
         style.map('TButton', background=[('active', '#4f4f4f')])
-        style.map('Accent.TButton', background=[('active', '#c74e38')])
+        style.map('Accent.TButton', background=[('active', '#2ea043')])
         style.map('Stop.TButton', background=[('active', '#93433d')])
         style.configure('TCheckbutton', background=c['panel'], foreground=c['fg'], font=('Microsoft YaHei UI', 10))
 
@@ -456,89 +476,122 @@ class App:
         tk.Label(top, text='OpenClaw 控制台', bg=c['bg'], fg=c['fg'],
                  font=('Microsoft YaHei UI', 14, 'bold')).pack(side='left')
 
-        # 状态灯区域
+        # 状态灯区域（模型/网关/生图 三灯并排）
         lamp = tk.Frame(top, bg=c['bg'])
         lamp.pack(side='right')
-        self.btn_log = ttk.Button(top, text='日志', command=self.open_log_window)
-        self.btn_log.pack(side='right', padx=(0, 8))
         self.lamp_llm = tk.Canvas(lamp, width=16, height=16, bg=c['bg'], highlightthickness=0)
         self.lamp_llm.pack(side='left', padx=(0, 4))
         tk.Label(lamp, text='模型', bg=c['bg'], fg=c['dim'], font=('Microsoft YaHei UI', 9)).pack(side='left', padx=(0, 10))
         self.lamp_gw = tk.Canvas(lamp, width=16, height=16, bg=c['bg'], highlightthickness=0)
         self.lamp_gw.pack(side='left', padx=(0, 4))
-        tk.Label(lamp, text='网关', bg=c['bg'], fg=c['dim'], font=('Microsoft YaHei UI', 9)).pack(side='left')
+        tk.Label(lamp, text='网关', bg=c['bg'], fg=c['dim'], font=('Microsoft YaHei UI', 9)).pack(side='left', padx=(0, 10))
+        self.lamp_comfy = tk.Canvas(lamp, width=16, height=16, bg=c['bg'], highlightthickness=0)
+        self.lamp_comfy.pack(side='left', padx=(0, 4))
+        tk.Label(lamp, text='生图', bg=c['bg'], fg=c['dim'], font=('Microsoft YaHei UI', 9)).pack(side='left')
+        self.btn_log = ttk.Button(top, text='日志', style='Top.TButton', command=self.open_log_window)
+        self.btn_log.pack(side='right', padx=(0, 8))
+        # 启动在前、停止在后（side=right 先 pack 靠右，故先放停止）
+        self.btn_all_stop = ttk.Button(top, text='⏹ 关闭所有', style='TopStop.TButton', command=self.stop_all)
+        self.btn_all_stop.pack(side='right', padx=(0, 6))
+        self.btn_all_start = ttk.Button(top, text='🚀 启动所有', style='TopAccent.TButton', command=self.start_all)
+        self.btn_all_start.pack(side='right', padx=(0, 6))
 
-        # ===== 面板1：本地模型服务 =====
-        p1 = ttk.Frame(root, style='Panel.TFrame')
-        p1.pack(fill='x', padx=12, pady=6)
-        ttk.Label(p1, text='本地模型服务 (llama-server)', style='Panel.TLabel',
+        # ===== 主 Notebook（翻页式布局，适配小屏）=====
+        nb = ttk.Notebook(root)
+        nb.pack(fill='both', expand=True, padx=10, pady=(30, 10))
+        st = ttk.Style()
+        st.configure('TNotebook', background=c['bg'], borderwidth=0, tabmargins=(4, 4, 4, 0))
+        st.configure('TNotebook.Tab', background=c['panel'], foreground=c['fg'],
+                     padding=(18, 7), font=('Microsoft YaHei UI', 10))
+        st.map('TNotebook.Tab', background=[('selected', c['accent'])],
+               foreground=[('selected', 'white')])
+
+        # ----- Tab 1：模型 -----
+        tab_model = ttk.Frame(nb, style='Panel.TFrame')
+        nb.add(tab_model, text=' 模型 ')
+        ttk.Label(tab_model, text='本地模型服务 (llama-server)', style='Panel.TLabel',
                   font=('Microsoft YaHei UI', 11, 'bold')).grid(row=0, column=0, columnspan=4, sticky='w', padx=10, pady=(10, 6))
 
-        ttk.Label(p1, text='推理模型', style='Panel.TLabel').grid(row=1, column=0, sticky='w', padx=10, pady=4)
+        ttk.Label(tab_model, text='推理模型', style='Panel.TLabel').grid(row=1, column=0, sticky='w', padx=10, pady=4)
         self.model_var = tk.StringVar()
-        self.model_combo = ttk.Combobox(p1, textvariable=self.model_var, state='readonly', width=42,
+        self.model_combo = ttk.Combobox(tab_model, textvariable=self.model_var, state='readonly', width=42,
                                       style='Dark.TCombobox')
         self.model_combo.grid(row=1, column=1, columnspan=2, sticky='we', padx=10, pady=4)
-        self.btn_model_dirs = ttk.Button(p1, text='目录', width=5, command=self.manage_model_dirs)
-        self.btn_model_dirs.grid(row=1, column=3, sticky='we', padx=(0, 6), pady=4)
-        self.btn_model_add = ttk.Button(p1, text='＋', width=3, command=self.add_custom_model)
-        self.btn_model_add.grid(row=1, column=4, sticky='we', padx=(0, 6), pady=4)
-        self.btn_model_del = ttk.Button(p1, text='－', width=3, command=self.del_custom_model)
-        self.btn_model_del.grid(row=1, column=5, sticky='we', padx=(0, 10), pady=4)
+        self.btn_model_dirs = ttk.Button(tab_model, text='目录', width=4, command=self.manage_model_dirs)
+        self.btn_model_dirs.grid(row=1, column=3, sticky='w', padx=(0, 10), pady=4)
+        # ＋－ 已合并进「模型扫描目录」弹窗（自定义模型区），模型行只留「目录」
 
-        self.btn_llm_start = ttk.Button(p1, text='▶  启动模型', style='Accent.TButton', command=self.start_llm)
-        self.btn_llm_start.grid(row=2, column=0, columnspan=3, sticky='we', padx=10, pady=(4, 10))
-        self.btn_llm_stop = ttk.Button(p1, text='■  停止模型', style='Stop.TButton', command=self.stop_llm)
-        self.btn_llm_stop.grid(row=2, column=3, columnspan=3, sticky='we', padx=10, pady=(4, 10))
+        # 启动/停止/硬件配置/一键恢复：LoRA 下方一排紧贴（硬件配置/一键恢复同刷新大小）
+        row6 = tk.Frame(tab_model, bg=c['panel'])
+        row6.grid(row=6, column=0, columnspan=6, sticky='w', padx=10, pady=(4, 8))
+        self.btn_llm_start = ttk.Button(row6, text='▶ 启动模型', style='Accent.TButton', command=self.start_llm)
+        self.btn_llm_start.pack(side='left', padx=(0, 6))
+        self.btn_llm_stop = ttk.Button(row6, text='■ 停止模型', style='Stop.TButton', command=self.stop_llm)
+        self.btn_llm_stop.pack(side='left', padx=(0, 16))
+        self.btn_hw = ttk.Button(row6, text='硬件配置', width=7, command=self.show_hardware)
+        self.btn_hw.pack(side='left', padx=(0, 6))
+        self.btn_restore = ttk.Button(row6, text='一键恢复', width=7, command=self._restore_all)
+        self.btn_restore.pack(side='left')
 
-        # 生图默认模型（选即保存，MCP 生图时读取）
-        gen_row = tk.Frame(p1, bg='#383838')
-        gen_row.grid(row=3, column=0, columnspan=6, sticky='we', padx=10, pady=(0, 8))
-        ttk.Label(gen_row, text='生图默认模型', style='Panel.TLabel').pack(side='left')
+        # 生图默认模型（选即保存，MCP 生图时读取；与推理模型同一列对齐）
         self.gen_model_var = tk.StringVar()
-        self.gen_model_combo = ttk.Combobox(gen_row, textvariable=self.gen_model_var, width=52,
-                                         style='Dark.TCombobox')
-        self.gen_model_combo.pack(side='left', padx=8)
+        self.gen_model_combo = ttk.Combobox(tab_model, textvariable=self.gen_model_var, width=52,
+                                            style='Dark.TCombobox')
+        ttk.Label(tab_model, text='生图默认模型', style='Panel.TLabel').grid(row=2, column=0, sticky='w', padx=(10, 8), pady=(0, 4))
+        self.gen_model_combo.grid(row=2, column=1, columnspan=2, sticky='we', padx=(6, 8), pady=(0, 4))
         self.gen_model_combo.bind('<<ComboboxSelected>>', self._save_gen_model)
-        self.btn_gen_refresh = ttk.Button(gen_row, text='刷新', width=4, command=self._refresh_gen_models)
-        self.btn_gen_refresh.pack(side='left')
+        self.btn_gen_refresh = ttk.Button(tab_model, text='刷新', width=4, command=self._refresh_gen_models)
+        self.btn_gen_refresh.grid(row=2, column=3, sticky='w')
         self._refresh_gen_models(initial=True)
 
-        # 生图默认 LoRA（按模型分流：krea2 系 / z-image 系，选即保存）
-        lora_row = tk.Frame(p1, bg='#383838')
-        lora_row.grid(row=4, column=0, columnspan=6, sticky='we', padx=10, pady=(0, 8))
-        ttk.Label(lora_row, text='生图默认LoRA', style='Panel.TLabel').pack(side='left')
-        ttk.Label(lora_row, text='Krea2', style='Dim.TLabel').pack(side='left', padx=(6, 0))
+        # 生图默认 LoRA（两排：Krea2 / Z-Image，输入框与上面同列对齐）
         self.lora_krea2_var = tk.StringVar()
-        self.lora_krea2_combo = ttk.Combobox(lora_row, textvariable=self.lora_krea2_var, width=30,
+        self.lora_krea2_combo = ttk.Combobox(tab_model, textvariable=self.lora_krea2_var, width=34,
                                              style='Dark.TCombobox')
-        self.lora_krea2_combo.pack(side='left', padx=4)
+        ttk.Label(tab_model, text='Krea2', style='Panel.TLabel').grid(row=3, column=0, sticky='w', padx=(10, 8), pady=(0, 4))
+        self.lora_krea2_combo.grid(row=3, column=1, columnspan=2, sticky='we', padx=(6, 8), pady=(0, 4))
         self.lora_krea2_combo.bind('<<ComboboxSelected>>', lambda e: self._save_lora('krea2'))
-        ttk.Label(lora_row, text='Z-Image', style='Dim.TLabel').pack(side='left', padx=(8, 0))
+        self.btn_lora_refresh = ttk.Button(tab_model, text='刷新', width=4, command=self._refresh_loras)
+        self.btn_lora_refresh.grid(row=3, column=3, sticky='w')
+
         self.lora_zimg_var = tk.StringVar()
-        self.lora_zimg_combo = ttk.Combobox(lora_row, textvariable=self.lora_zimg_var, width=30,
+        self.lora_zimg_combo = ttk.Combobox(tab_model, textvariable=self.lora_zimg_var, width=34,
                                             style='Dark.TCombobox')
-        self.lora_zimg_combo.pack(side='left', padx=4)
+        ttk.Label(tab_model, text='Z-Image', style='Panel.TLabel').grid(row=4, column=0, sticky='w', padx=(10, 8), pady=(0, 8))
+        self.lora_zimg_combo.grid(row=4, column=1, columnspan=2, sticky='we', padx=(6, 8), pady=(0, 8))
         self.lora_zimg_combo.bind('<<ComboboxSelected>>', lambda e: self._save_lora('zimg'))
-        self.btn_lora_refresh = ttk.Button(lora_row, text='刷新', width=4, command=self._refresh_loras)
-        self.btn_lora_refresh.pack(side='left', padx=(8, 0))
         self._refresh_loras(initial=True)
 
-        # ComfyUI 生图服务（控制）
-        comfy_row = tk.Frame(p1, bg='#383838')
-        comfy_row.grid(row=5, column=0, columnspan=6, sticky='we', padx=10, pady=(0, 6))
-        self.lamp_comfy = tk.Canvas(comfy_row, width=14, height=14, bg=c['panel'], highlightthickness=0)
-        self.lamp_comfy.pack(side='left')
-        ttk.Label(comfy_row, text='ComfyUI 生图服务', style='Panel.TLabel').pack(side='left', padx=6)
-        self.btn_comfy_stop = ttk.Button(comfy_row, text='停止', command=self.stop_comfy)
+        # 系统负载监控行（仅负载显示）
+        sys_row = tk.Frame(tab_model, bg=c['panel'])
+        sys_row.grid(row=7, column=0, columnspan=6, sticky='we', padx=10, pady=(0, 10))
+        ttk.Label(sys_row, text='系统', style='Panel.TLabel').pack(side='left', padx=(0, 6))
+        self.lbl_sys = ttk.Label(sys_row, text='--', style='Panel.TLabel')
+        self.lbl_sys.pack(side='left')
+        tab_model.columnconfigure(1, weight=1)
+
+        # ----- Tab 2：ComfyUI（页签名：生图）-----
+        tab_comfy = ttk.Frame(nb, style='Panel.TFrame')
+        ttk.Label(tab_comfy, text='生图服务（ComfyUI）', style='Panel.TLabel',
+                  font=('Microsoft YaHei UI', 11, 'bold')).grid(row=0, column=0, columnspan=4, sticky='w', padx=10, pady=(14, 6))
+
+        comfy_row = tk.Frame(tab_comfy, bg='#383838')
+        comfy_row.grid(row=1, column=0, columnspan=6, sticky='we', padx=10, pady=(0, 10))
+        # 启动类（重启）在前、停止在后
+        self.btn_comfy_restart = ttk.Button(comfy_row, text='▶  重启', style='Accent.TButton', command=self.restart_comfy)
+        self.btn_comfy_restart.pack(side='left')
+        self.btn_comfy_stop = ttk.Button(comfy_row, text='■  停止', style='Stop.TButton', command=self.stop_comfy)
         self.btn_comfy_stop.pack(side='left', padx=(8, 0))
-        self.btn_comfy_restart = ttk.Button(comfy_row, text='重启', command=self.restart_comfy)
-        self.btn_comfy_restart.pack(side='left', padx=(8, 0))
-        self._set_lamp(self.lamp_comfy, False, '#9a9a9a')
+        # 远程地址做成可点击超链接
+        self.comfy_url_lbl = tk.Label(comfy_row, text='远程: https://game.tail8c09f5.ts.net:8443/comfy',
+                                      bg='#383838', fg='#6cb4ee', font=('Microsoft YaHei UI', 9),
+                                      cursor='hand2')
+        self.comfy_url_lbl.pack(side='right', padx=10)
+        self.comfy_url_lbl.bind('<Button-1>', lambda e: self._open_comfy_remote())
 
         # ComfyUI 工具行（清理 + 文件夹）
-        comfy_tools_row = tk.Frame(p1, bg='#383838')
-        comfy_tools_row.grid(row=6, column=0, columnspan=6, sticky='we', padx=10, pady=(0, 6))
+        comfy_tools_row = tk.Frame(tab_comfy, bg='#383838')
+        comfy_tools_row.grid(row=2, column=0, columnspan=6, sticky='we', padx=10, pady=(0, 6))
         self.btn_comfy_ram = ttk.Button(comfy_tools_row, text='清理内存', command=self.cleanup_ram)
         self.btn_comfy_ram.pack(side='left')
         self.btn_comfy_vram = ttk.Button(comfy_tools_row, text='清理显存', command=self.cleanup_vram)
@@ -547,118 +600,133 @@ class App:
         self.btn_comfy_upload.pack(side='left', padx=(16, 0))
         self.btn_comfy_output = ttk.Button(comfy_tools_row, text='生成文件夹', command=self.open_output_dir)
         self.btn_comfy_output.pack(side='left', padx=(8, 0))
+        tab_comfy.columnconfigure(1, weight=1)
 
-        # 系统负载监控行
-        sys_row = tk.Frame(p1, bg=c['panel'])
-        sys_row.grid(row=7, column=0, columnspan=6, sticky='we', padx=10, pady=(0, 10))
-        ttk.Label(sys_row, text='系统', style='Panel.TLabel').pack(side='left', padx=(0, 6))
-        self.lbl_sys = ttk.Label(sys_row, text='--', style='Panel.TLabel')
-        self.lbl_sys.pack(side='left')
-        self.btn_hw = ttk.Button(sys_row, text='硬件配置', width=10, command=self.show_hardware)
-        self.btn_hw.pack(side='left', padx=(20, 0))
-        self.btn_restore = ttk.Button(sys_row, text='一键恢复', width=10, command=self._restore_all)
-        self.btn_restore.pack(side='left', padx=(8, 0))
-
-        p1.columnconfigure(1, weight=1)
-
-        # ===== 面板2：OpenClaw 网关 =====
-        p2 = ttk.Frame(root, style='Panel.TFrame')
-        p2.pack(fill='x', padx=12, pady=6)
-        ttk.Label(p2, text='OpenClaw 网关', style='Panel.TLabel',
+        # ----- Tab 3：网关 & 广域网 -----
+        tab_gw = ttk.Frame(nb, style='Panel.TFrame')
+        nb.add(tab_gw, text=' 网关 ')
+        ttk.Label(tab_gw, text='OpenClaw 网关', style='Panel.TLabel',
                   font=('Microsoft YaHei UI', 11, 'bold')).grid(row=0, column=0, columnspan=4, sticky='w', padx=10, pady=(10, 6))
 
         self.gw_info = tk.StringVar(value='—')
-        ttk.Label(p2, textvariable=self.gw_info, style='Dim.TLabel').grid(row=1, column=0, columnspan=4, sticky='w', padx=10, pady=4)
+        ttk.Label(tab_gw, textvariable=self.gw_info, style='Dim.TLabel').grid(row=1, column=0, columnspan=4, sticky='w', padx=10, pady=4)
 
-        self.btn_gw_start = ttk.Button(p2, text='▶  启动网关', style='Accent.TButton', command=self.start_gw)
+        self.btn_gw_start = ttk.Button(tab_gw, text='▶  启动网关', style='Accent.TButton', command=self.start_gw)
         self.btn_gw_start.grid(row=2, column=0, sticky='we', padx=10, pady=(4, 10))
-        self.btn_gw_stop = ttk.Button(p2, text='■  停止网关', style='Stop.TButton', command=self.stop_gw)
+        self.btn_gw_stop = ttk.Button(tab_gw, text='■  停止网关', style='Stop.TButton', command=self.stop_gw)
         self.btn_gw_stop.grid(row=2, column=1, sticky='we', padx=(0, 10), pady=(4, 10))
-        self.btn_dash = ttk.Button(p2, text='打开控制台', command=self.open_dashboard)
+        self.btn_dash = ttk.Button(tab_gw, text='打开控制台', command=self.open_dashboard)
         self.btn_dash.grid(row=2, column=2, sticky='we', padx=(0, 6), pady=(4, 10))
-        self.btn_copy_key = ttk.Button(p2, text='复制密钥', command=self.copy_gw_key)
+        self.btn_copy_key = ttk.Button(tab_gw, text='复制密钥', command=self.copy_gw_key)
         self.btn_copy_key.grid(row=2, column=3, sticky='we', padx=(0, 10), pady=(4, 10))
-        p2.columnconfigure(2, weight=1)
+        tab_gw.columnconfigure(2, weight=1)
+        nb.add(tab_comfy, text=' 生图 ')
 
-        # ===== 面板2.5：广域网（Tailscale 远程访问 / 一键复原）=====
-        p2w = ttk.Frame(root, style='Panel.TFrame')
-        p2w.pack(fill='x', padx=12, pady=6)
-        ttk.Label(p2w, text='广域网远程访问（Tailscale）', style='Panel.TLabel',
-                  font=('Microsoft YaHei UI', 11, 'bold')).grid(row=0, column=0, columnspan=6, sticky='w', padx=10, pady=(10, 4))
+        # 广域网（Tailscale 远程访问 / 一键复原）
+        ttk.Separator(tab_gw, orient='horizontal').grid(row=3, column=0, columnspan=4, sticky='we', padx=10, pady=(0, 6))
+        ttk.Label(tab_gw, text='广域网远程访问（Tailscale）', style='Panel.TLabel',
+                  font=('Microsoft YaHei UI', 11, 'bold')).grid(row=4, column=0, columnspan=4, sticky='w', padx=10, pady=(6, 4))
         self.wan_info = tk.StringVar(value='未检测 · 点「一键复原广域网」自动配置')
-        ttk.Label(p2w, textvariable=self.wan_info, style='Dim.TLabel').grid(row=1, column=0, columnspan=6, sticky='w', padx=10, pady=4)
-        self.btn_wan_restore = ttk.Button(p2w, text='🔧 一键复原广域网', style='Accent.TButton', command=self.wan_restore)
-        self.btn_wan_restore.grid(row=2, column=0, sticky='we', padx=10, pady=(4, 10))
-        self.btn_wan_copy = ttk.Button(p2w, text='复制远程地址', command=self.wan_copy_url)
-        self.btn_wan_copy.grid(row=2, column=1, sticky='we', padx=(0, 6), pady=(4, 10))
-        self.btn_wan_open = ttk.Button(p2w, text='打开远程地址', command=self.wan_open_url)
-        self.btn_wan_open.grid(row=2, column=2, sticky='we', padx=(0, 10), pady=(4, 10))
-        p2w.columnconfigure(3, weight=1)
+        ttk.Label(tab_gw, textvariable=self.wan_info, style='Dim.TLabel').grid(row=5, column=0, columnspan=4, sticky='w', padx=10, pady=4)
+        self.btn_wan_restore = ttk.Button(tab_gw, text='🔧 一键复原广域网', style='Accent.TButton', command=self.wan_restore)
+        self.btn_wan_restore.grid(row=6, column=0, sticky='we', padx=10, pady=(4, 10))
+        self.btn_wan_copy = ttk.Button(tab_gw, text='复制远程地址', command=self.wan_copy_url)
+        self.btn_wan_copy.grid(row=6, column=1, sticky='we', padx=(0, 6), pady=(4, 10))
+        self.btn_wan_open = ttk.Button(tab_gw, text='打开远程地址', command=self.wan_open_url)
+        self.btn_wan_open.grid(row=6, column=2, sticky='we', padx=(0, 10), pady=(4, 10))
 
-        # ===== 面板2.6：安装路径设置（重装系统后复原）=====
-        p2p = ttk.Frame(root, style='Panel.TFrame')
-        p2p.pack(fill='x', padx=12, pady=6)
-        ttk.Label(p2p, text='安装路径设置（重装系统后在此改路径，保存即复原）', style='Panel.TLabel',
+        # ----- Tab 4：设置（路径 + 自启） -----
+        tab_set = ttk.Frame(nb, style='Panel.TFrame')
+        nb.add(tab_set, text=' 设置 ')
+        ttk.Label(tab_set, text='安装路径设置（重装系统后在此改路径，保存即复原）', style='Panel.TLabel',
                   font=('Microsoft YaHei UI', 11, 'bold')).grid(row=0, column=0, columnspan=5, sticky='w', padx=10, pady=(10, 4))
         self.path_vars = {}
         _row = 1
         for key, label in [('llama_dir', 'LLM 模型目录'), ('comfy_root', 'ComfyUI 根目录'), ('openclaw_data', 'OpenClaw 数据目录')]:
-            ttk.Label(p2p, text=label, style='Panel.TLabel').grid(row=_row, column=0, sticky='w', padx=(10, 4), pady=3)
+            ttk.Label(tab_set, text=label, style='Panel.TLabel').grid(row=_row, column=0, sticky='w', padx=(10, 4), pady=3)
             v = tk.StringVar(value=_PATHS.get(key, ''))
             self.path_vars[key] = v
-            ttk.Entry(p2p, textvariable=v, width=46).grid(row=_row, column=1, columnspan=3, sticky='we', padx=4, pady=3)
-            ttk.Button(p2p, text='浏览…', width=6,
+            ttk.Entry(tab_set, textvariable=v, width=46).grid(row=_row, column=1, columnspan=3, sticky='we', padx=4, pady=3)
+            ttk.Button(tab_set, text='浏览…', width=6,
                        command=lambda k=key, vv=v: self._browse_path(k, vv)).grid(row=_row, column=4, sticky='we', padx=(0, 10), pady=3)
             _row += 1
-        ttk.Button(p2p, text='保存路径并应用', style='Accent.TButton',
+        ttk.Button(tab_set, text='保存路径并应用', style='Accent.TButton',
                    command=self.save_paths_ui).grid(row=_row, column=1, columnspan=3, sticky='we', padx=4, pady=(6, 10))
-        p2p.columnconfigure(3, weight=1)
 
-        # ===== 面板3：开机自启 =====
-        p3 = ttk.Frame(root, style='Panel.TFrame')
-        p3.pack(fill='x', padx=12, pady=6)
+        ttk.Separator(tab_set, orient='horizontal').grid(row=_row + 1, column=0, columnspan=5, sticky='we', padx=10, pady=(6, 6))
+        ttk.Label(tab_set, text='开机自启', style='Panel.TLabel',
+                  font=('Microsoft YaHei UI', 11, 'bold')).grid(row=_row + 2, column=0, columnspan=5, sticky='w', padx=10, pady=(6, 2))
+        # 开机自启：勾选框 + 中间状态灯 + 文字（灯：勾=绿 未勾=红）
+        def _mk_autostart(row, col, colspan, text, var, cmd, lamp_attr):
+            f = ttk.Frame(tab_set, style='Panel.TFrame')
+            f.grid(row=row, column=col, columnspan=colspan, sticky='w', padx=10, pady=2)
+            ttk.Checkbutton(f, text='', variable=var, command=cmd,
+                            style='TCheckbutton').pack(side='left')
+            cv = tk.Canvas(f, width=12, height=12, bg=c['panel'], highlightthickness=0)
+            cv.pack(side='left', padx=(4, 6))
+            ttk.Label(f, text=text, style='Panel.TLabel').pack(side='left')
+            f.winfo_children()[-1].bind('<Button-1>',
+                                        lambda e, vv=var: vv.set(not vv.get()))
+            setattr(self, lamp_attr, cv)
+            return cv
+
         self.autostart_var = tk.BooleanVar(value=self._autostart_exists())
-        ttk.Checkbutton(p3, text='开机自动启动本地模型服务（跟随当前选择的模型）',
-                        variable=self.autostart_var, command=self.toggle_autostart,
-                        style='TCheckbutton').pack(anchor='w', padx=10, pady=(8, 0))
+        self.lamp_auto_model = _mk_autostart(_row + 3, 0, 2,
+            '开机自动启动本地模型服务（跟随当前选择的模型）',
+            self.autostart_var, self.toggle_autostart, 'lamp_auto_model')
         self.gw_autostart_var = tk.BooleanVar(value=self._gw_autostart_exists())
-        ttk.Checkbutton(p3, text='开机自动启动 OpenClaw 网关',
-                        variable=self.gw_autostart_var, command=self.toggle_gw_autostart,
-                        style='TCheckbutton').pack(anchor='w', padx=10, pady=(0, 8))
+        self.lamp_auto_gw = _mk_autostart(_row + 3, 3, 2,
+            '开机自动启动 OpenClaw 网关',
+            self.gw_autostart_var, self.toggle_gw_autostart, 'lamp_auto_gw')
         self.comfy_autostart_var = tk.BooleanVar(value=self._comfy_autostart_exists())
-        ttk.Checkbutton(p3, text='开机自动启动 ComfyUI 生图服务',
-                        variable=self.comfy_autostart_var, command=self.toggle_comfy_autostart,
-                        style='TCheckbutton').pack(anchor='w', padx=10, pady=(0, 8))
+        self.lamp_auto_comfy = _mk_autostart(_row + 4, 0, 5,
+            '开机自动启动 ComfyUI 生图服务',
+            self.comfy_autostart_var, self.toggle_comfy_autostart, 'lamp_auto_comfy')
 
-        # ===== 面板4：环境体检 & 调试 =====
-        p4 = ttk.Frame(root, style='Panel.TFrame')
-        p4.pack(fill='x', padx=12, pady=6)
-        ttk.Label(p4, text='环境体检 & 调试', style='Panel.TLabel',
+        # 自启状态灯更新：勾选=绿，未勾=红
+        def _update_auto_lamps(*_a):
+            for cv, var in ((self.lamp_auto_model, self.autostart_var),
+                            (self.lamp_auto_gw, self.gw_autostart_var),
+                            (self.lamp_auto_comfy, self.comfy_autostart_var)):
+                cv.delete('all')
+                cv.create_oval(2, 2, 10, 10,
+                               fill='#52C41A' if var.get() else '#EA6668', outline='')
+        self.autostart_var.trace_add('write', _update_auto_lamps)
+        self.gw_autostart_var.trace_add('write', _update_auto_lamps)
+        self.comfy_autostart_var.trace_add('write', _update_auto_lamps)
+        _update_auto_lamps()
+        tab_set.columnconfigure(3, weight=1)
+
+        # ----- Tab 5：调试（环境体检） -----
+        tab_dbg = ttk.Frame(nb, style='Panel.TFrame')
+        nb.add(tab_dbg, text=' 调试 ')
+        ttk.Label(tab_dbg, text='环境体检 & 调试', style='Panel.TLabel',
                   font=('Microsoft YaHei UI', 11, 'bold')).grid(row=0, column=0, columnspan=10, sticky='w', padx=10, pady=(10, 4))
 
         self.env_frames = {}   # kind -> (lamp_canvas, btn)
-        env_row = ttk.Frame(p4)
+        env_row = ttk.Frame(tab_dbg)
         env_row.grid(row=1, column=0, columnspan=10, sticky='we', padx=10, pady=(0, 4))
         kinds = [('node', 'Node.js'), ('openclaw', 'OpenClaw'), ('llama', 'llama.cpp'),
                  ('models', '模型文件'), ('cfg', '网关配置')]
         for i, (kind, label) in enumerate(kinds):
             f = ttk.Frame(env_row)
-            f.grid(row=0, column=i, padx=(0, 18), sticky='w')
+            f.grid(row=i // 3, column=i % 3, padx=(0, 18), pady=2, sticky='w')
             lamp = tk.Canvas(f, width=14, height=14, bg=c['panel'], highlightthickness=0)
             lamp.pack(side='left', padx=(0, 4))
-            ttk.Label(f, text=label, style='Panel.TLabel').pack(side='left')
+            ttk.Label(f, text=label, style='Panel.TLabel', width=12, anchor='w').pack(side='left')
             btn = ttk.Button(f, text='…', width=4, command=lambda k=kind: self.env_action(k))
             btn.pack(side='left', padx=(4, 0))
             self.env_frames[kind] = (lamp, btn)
-        ttk.Label(p4, text='状态灯：●绿=就绪  ●红=缺失  ●灰=未检测', style='Dim.TLabel').grid(
+        ttk.Label(tab_dbg, text='状态灯：●绿=就绪  ●红=缺失  ●灰=未检测', style='Dim.TLabel').grid(
             row=2, column=0, columnspan=10, sticky='w', padx=10, pady=(0, 4))
 
-        dbg_row = ttk.Frame(p4)
+        dbg_row = ttk.Frame(tab_dbg)
         dbg_row.grid(row=3, column=0, columnspan=10, sticky='we', padx=10, pady=(0, 10))
+        # 启动类（全清重启/重启网关）放最前面
+        ttk.Button(dbg_row, text='🔧 全清重启', style='Accent.TButton', command=self.clean_restart_gw).pack(side='left', padx=(0, 8))
+        ttk.Button(dbg_row, text='重启网关', command=self.restart_gw).pack(side='left', padx=(0, 8))
         ttk.Button(dbg_row, text='测试模型API', command=self.test_llm_api).pack(side='left', padx=(0, 8))
         ttk.Button(dbg_row, text='测试网关', command=self.test_gw).pack(side='left', padx=(0, 8))
-        ttk.Button(dbg_row, text='重启网关', command=self.restart_gw).pack(side='left', padx=(0, 8))
-        ttk.Button(dbg_row, text='🔧 全清重启', style='Accent.TButton', command=self.clean_restart_gw).pack(side='left', padx=(0, 8))
         ttk.Button(dbg_row, text='复制日志', command=self.copy_log).pack(side='left', padx=(0, 8))
 
         # ===== 日志区 =====（已移至独立磁吸窗口，顶部“日志”按钮打开）
@@ -666,6 +734,18 @@ class App:
         self.log('OpenClaw 控制台 v2.2 启动')
         self.log(f'模型目录: {MODELS_DIR}')
         self.log(f'网关: {DASH_URL}')
+
+        # 窗口贴屏幕底边（固定高度，避免 Notebook 请求高度撑爆窗口贴顶）
+        try:
+            _sw = root.winfo_screenwidth()
+            _sh = root.winfo_screenheight()
+            _win_w = min(980, _sw - 40)
+            _win_h = min(540, _sh - 90)
+            _x = max((_sw - _win_w) // 2, 0)
+            _y = max(_sh - _win_h - 56, 24)
+            root.geometry(f'{_win_w}x{_win_h}+{_x}+{_y}')
+        except Exception:
+            pass
         self.root.after(300, self._refresh_env)
 
     # ---------- 日志 ----------
@@ -1101,7 +1181,7 @@ class App:
         # 读已保存的默认（gen_model.txt 记录 basename）
         saved = ''
         try:
-            saved = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gen_model.txt'),
+            saved = open(os.path.join(_BASE_DIR, 'gen_model.txt'),
                                       encoding='utf-8').read().strip()
         except Exception:
             pass
@@ -1133,7 +1213,7 @@ class App:
             return
         base = name.replace('\\', '/').rsplit('/', 1)[-1]
         try:
-            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gen_model.txt'),
+            with open(os.path.join(_BASE_DIR, 'gen_model.txt'),
                                    'w', encoding='utf-8') as f:
                 f.write(base)
             self.log('生图默认模型已设为：' + base)
@@ -1153,11 +1233,10 @@ class App:
         self._loras = loras
         self.lora_krea2_combo['values'] = loras
         self.lora_zimg_combo['values'] = loras
-        base = os.path.dirname(os.path.abspath(__file__))
         for key, var in (('krea2', self.lora_krea2_var), ('zimg', self.lora_zimg_var)):
             saved = ''
             try:
-                saved = io.open(os.path.join(base, 'gen_lora_%s.txt' % key), encoding='utf-8').read().strip()
+                saved = io.open(os.path.join(_BASE_DIR, 'gen_lora_%s.txt' % key), encoding='utf-8').read().strip()
             except Exception:
                 pass
             cur = ''
@@ -1182,7 +1261,7 @@ class App:
         if not name:
             return
         base = name.replace('\\', '/').rsplit('/', 1)[-1]
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gen_lora_%s.txt' % kind)
+        path = os.path.join(_BASE_DIR, 'gen_lora_%s.txt' % kind)
         try:
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(base)
@@ -1306,16 +1385,18 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     def manage_model_dirs(self):
-        """管理额外模型扫描目录"""
+        """管理额外模型扫描目录 + 自定义单文件（合并后的入口）"""
         win = tk.Toplevel(self.root)
         win.title('模型扫描目录')
-        win.geometry('520x260')
+        win.geometry('600x560')
+        win.minsize(520, 460)
         win.transient(self.root)
         win.grab_set()
-        ttk.Label(win, text='额外扫描目录（模型文件所在文件夹，可添加多个）：',
+        # ---- ① 额外扫描目录 ----
+        ttk.Label(win, text='① 额外扫描目录（模型文件所在文件夹，可添加多个）：',
                   style='Panel.TLabel').pack(anchor='w', padx=12, pady=(12, 4))
-        lb = tk.Listbox(win, font=('Microsoft YaHei UI', 9))
-        lb.pack(fill='both', expand=True, padx=12, pady=(0, 6))
+        lb = tk.Listbox(win, font=('Microsoft YaHei UI', 9), height=6)
+        lb.pack(fill='both', expand=True, padx=12, pady=(0, 4))
         for d in load_extra_dirs():
             lb.insert('end', d)
         def add_dir():
@@ -1346,16 +1427,77 @@ class App:
             self.models = list_models()
             self._refresh_models_combo()
             self.log('已移除扫描目录: ' + d)
+        row1 = ttk.Frame(win)
+        row1.pack(fill='x', padx=12)
+        ttk.Button(row1, text='添加目录', command=add_dir).pack(side='left', padx=(0, 8))
+        ttk.Button(row1, text='移除选中', command=rm_dir).pack(side='left', padx=(0, 8))
+        # ---- ② 自定义单文件 ----
+        ttk.Label(win, text='② 自定义模型（单个 .gguf 文件，不在扫描目录里）：',
+                  style='Panel.TLabel').pack(anchor='w', padx=12, pady=(12, 4))
+        lb2 = tk.Listbox(win, font=('Microsoft YaHei UI', 9), height=4)
+        lb2.pack(fill='both', expand=True, padx=12, pady=(0, 4))
+        for it in load_customs():
+            p = it.get('path', '')
+            lb2.insert('end', os.path.basename(p) + '   <-   ' + p)
+        def add_file():
+            from tkinter import filedialog
+            p = filedialog.askopenfilename(
+                title='选择模型文件 (.gguf)',
+                filetypes=[('GGUF 模型', '*.gguf'), ('所有文件', '*.*')])
+            if not p:
+                return
+            # 拦截视觉投影文件：引导选同目录主模型
+            if os.path.basename(p).lower().startswith('mmproj'):
+                d = os.path.dirname(p)
+                mains = [f for f in sorted(os.listdir(d))
+                         if f.endswith('.gguf') and not f.lower().startswith('mmproj')]
+                if len(mains) == 1:
+                    p = os.path.join(d, mains[0])
+                    self.log('选中的是视觉投影，已自动改为同目录主模型: ' + mains[0])
+                elif mains:
+                    messagebox.showinfo('提示',
+                        '这是视觉投影文件(mmproj)，不能作为主模型运行。\n\n'
+                        '请选择主模型，同目录下有：\n' + '\n'.join(mains))
+                    return
+                else:
+                    messagebox.showwarning('提示', '这是视觉投影文件(mmproj)，不能作为主模型运行')
+                    return
+            items = load_customs()
+            for it in items:
+                if os.path.normcase(it.get('path', '')) == os.path.normcase(p):
+                    self.log('该模型已在列表: ' + os.path.basename(p))
+                    return
+            items.append({'path': p})
+            save_customs(items)
+            lb2.insert('end', os.path.basename(p) + '   <-   ' + p)
+            self.models = list_models()
+            self._refresh_models_combo()
+            self.log('已添加自定义模型: ' + os.path.basename(p))
+        def rm_file():
+            sel = lb2.curselection()
+            if not sel:
+                return
+            items = load_customs()
+            it = items[sel[0]]
+            items.remove(it)
+            save_customs(items)
+            lb2.delete(sel[0])
+            self.models = list_models()
+            self._refresh_models_combo()
+            self.log('已移除自定义模型: ' + os.path.basename(it.get('path', '')))
+        row2 = ttk.Frame(win)
+        row2.pack(fill='x', padx=12)
+        ttk.Button(row2, text='添加文件', command=add_file).pack(side='left', padx=(0, 8))
+        ttk.Button(row2, text='移除选中', command=rm_file).pack(side='left', padx=(0, 8))
+        # ---- 底部 ----
         def refresh():
             self.models = list_models()
             self._refresh_models_combo()
             self.log('已刷新模型下拉')
-        btns = ttk.Frame(win)
-        btns.pack(fill='x', padx=12, pady=(0, 12))
-        ttk.Button(btns, text='添加目录', command=add_dir).pack(side='left', padx=(0, 8))
-        ttk.Button(btns, text='移除选中', command=rm_dir).pack(side='left', padx=(0, 8))
-        ttk.Button(btns, text='刷新下拉', command=refresh).pack(side='left', padx=(0, 8))
-        ttk.Button(btns, text='关闭', command=win.destroy).pack(side='right')
+        row3 = ttk.Frame(win)
+        row3.pack(fill='x', padx=12, pady=(0, 12))
+        ttk.Button(row3, text='刷新下拉', command=refresh).pack(side='left', padx=(0, 8))
+        ttk.Button(row3, text='关闭', command=win.destroy).pack(side='right')
 
     def add_custom_model(self):
         from tkinter import filedialog
@@ -1407,6 +1549,28 @@ class App:
         self.models = list_models()
         self._refresh_models_combo()
         self.log('已删除自定义模型: ' + os.path.basename(p))
+
+    # ---------- 一键启动/关闭所有模块 ----------
+    def start_all(self):
+        self.log('🚀 启动所有模块 …')
+        threading.Thread(target=self._start_all_worker, daemon=True).start()
+
+    def _start_all_worker(self):
+        self.start_llm()
+        time.sleep(1)
+        self.restart_comfy()
+        self.start_gw()
+        self.log('✅ 启动所有模块完成（详见各模块日志）')
+
+    def stop_all(self):
+        self.log('⏹ 关闭所有模块 …')
+        threading.Thread(target=self._stop_all_worker, daemon=True).start()
+
+    def _stop_all_worker(self):
+        self.stop_llm()
+        self.stop_comfy()
+        self.stop_gw()
+        self.log('✅ 关闭所有模块完成')
 
     # ---------- 模型服务 ----------
     def start_llm(self):
@@ -1667,8 +1831,16 @@ class App:
         if host:
             webbrowser.open(host)
 
+    def _open_comfy_remote(self):
+        """打开 ComfyUI 远程地址（8443 通道）"""
+        host = self._wan_hostname()
+        if host:
+            webbrowser.open(host.rstrip('/') + ':8443/comfy')
+
     def wan_restore(self):
-        """一键复原广域网：检查 Tailscale -> 配置 serve（网关根路径 + ComfyUI /comfy）"""
+        """一键复原广域网（终态）：
+        Tailscale PATH 注入 -> serve reset 清旧规则 -> openclaw.json 写 serve 托管配置
+        -> 重启网关（OpenClaw 自动 claim 443 根路径）-> ComfyUI 走 8443 通道"""
         def work():
             self.log('🔧 一键复原广域网…')
             exe = TAILSCALE_EXE
@@ -1686,25 +1858,63 @@ class App:
                     time.sleep(6)
             except Exception as e:
                 self.log('检查 Tailscale 失败: ' + str(e))
-            for args in ([exe, 'serve', '--bg', str(PORT_GW)],
-                         [exe, 'serve', '--bg', '--https=443', '--set-path=/comfy', 'http://127.0.0.1:8188']):
-                try:
-                    subprocess.run(args, capture_output=True, text=True, timeout=30)
-                except Exception as e:
-                    self.log('serve 配置失败: ' + str(e))
+            # 1) PATH 注入（重装系统后 spawn tailscale 依赖）
+            try:
+                ts_dir = os.path.dirname(exe)
+                cur = os.environ.get('PATH', '')
+                if ts_dir and ts_dir not in cur:
+                    os.environ['PATH'] = ts_dir + ';' + cur
+                    subprocess.run(['powershell', '-NoProfile', '-Command',
+                                    "$p=[Environment]::GetEnvironmentVariable('Path','User'); "
+                                    "if($p -notlike '*Tailscale*'){[Environment]::SetEnvironmentVariable('Path', 'C:\\Program Files\\Tailscale;' + $p, 'User')}"],
+                                   capture_output=True, text=True, timeout=15,
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
+                    self.log('✅ 已把 Tailscale 加入用户 PATH')
+            except Exception as e:
+                self.log('PATH 注入失败: ' + str(e))
+            # 2) 清空旧 serve 规则（防止 443 被旧规则占用导致 OpenClaw 无法接管）
+            subprocess.run([exe, 'serve', 'reset'], capture_output=True, text=True, timeout=30)
+            self.log('已清空旧 serve 规则')
+            # 3) 写入 openclaw.json 终态 gateway 配置（serve 托管 + allowTailscale）
+            try:
+                oc_cfg = os.path.join(OPENCLAW_DATA, 'openclaw.json')
+                cfg = {}
+                if os.path.isfile(oc_cfg):
+                    try:
+                        cfg = json.loads(io.open(oc_cfg, encoding='utf-8').read() or '{}')
+                    except Exception:
+                        cfg = {}
+                gw = cfg.setdefault('gateway', {})
+                gw['mode'] = 'local'
+                gw['bind'] = 'loopback'
+                gw['port'] = PORT_GW
+                auth = gw.setdefault('auth', {})
+                auth['mode'] = 'token'
+                auth['allowTailscale'] = True
+                if not auth.get('token'):
+                    auth['token'] = gw_token() or 'replace-with-your-token'
+                gw['tailscale'] = {'mode': 'serve'}
+                gw.pop('trustedProxies', None)
+                with io.open(oc_cfg, 'w', encoding='utf-8', newline='\n') as f:
+                    json.dump(cfg, f, ensure_ascii=False, indent=2)
+                self.log('✅ openclaw.json 已写入 serve 托管配置')
+            except Exception as e:
+                self.log('写入 openclaw.json 失败: ' + str(e))
+            # 4) 重启网关（OpenClaw 自动 claim 443 根路径）
+            self.stop_gw()
+            time.sleep(2)
+            self.start_gw()
+            time.sleep(7)
+            # 5) ComfyUI 8443 通道（443 被 OpenClaw claim，ComfyUI 走独立端口）
+            subprocess.run([exe, 'serve', '--bg', '--https=8443', '--set-path=/comfy',
+                            'http://127.0.0.1:8188'], capture_output=True, text=True, timeout=30)
             host = self._wan_hostname()
             if host:
-                r = subprocess.run([exe, 'serve', 'status'], capture_output=True, text=True, timeout=15,
-                                   encoding='utf-8', errors='replace')
-                if 'No serve config' in (r.stdout or ''):
-                    self.wan_info.set('Serve 未启用，请去 Tailscale 网页启用')
-                    self.log('⚠ Serve 未启用：请打开 https://login.tailscale.com/f/serve 启用后重试')
-                else:
-                    self.wan_info.set('已启用 · ' + host + '（/comfy 为 ComfyUI）')
-                    self.log('✅ 广域网已复原：' + host + ' · ComfyUI: /comfy')
+                self.wan_info.set('已启用 · ' + host + ' · ComfyUI: ' + host + ':8443/comfy')
+                self.log('✅ 广域网已复原：' + host + ' · ComfyUI: ' + host + ':8443/comfy')
             else:
-                self.wan_info.set('配置失败（Tailscale 未登录）')
-                self.log('❌ 广域网配置失败：Tailscale 未登录或未启用 Serve')
+                self.wan_info.set('配置已写入（Tailscale 未登录，登录后重试）')
+                self.log('⚠ 配置已写入，Tailscale 未登录，请登录后重试')
         threading.Thread(target=work, daemon=True).start()
 
     def start_gw(self):
@@ -1716,7 +1926,8 @@ class App:
                               encoding='utf-8', errors='replace', buffering=1)
             env = dict(os.environ)
             env['OPENCLAW_STATE_DIR'] = r'L:\OpenClaw\OpenClawData'
-            env['PATH'] = os.path.dirname(NODE_EXE) + ';' + env.get('PATH', '')
+            ts_dir = os.path.dirname(TAILSCALE_EXE) if os.path.isfile(TAILSCALE_EXE) else ''
+            env['PATH'] = (ts_dir + ';' if ts_dir else '') + os.path.dirname(NODE_EXE) + ';' + env.get('PATH', '')
             subprocess.Popen(['cmd', '/c', r'L:\OpenClaw\OpenClawData\gateway.cmd'],
                              stdout=gw_logf, stderr=subprocess.STDOUT,
                              creationflags=subprocess.CREATE_NO_WINDOW, env=env)
@@ -1945,6 +2156,15 @@ class App:
         self.root.destroy()
 
 def main():
+    # DPI 感知：按物理像素布局，避免系统缩放（125%/150%）把窗口放大到巨大
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
     root = tk.Tk()
     app = App(root)
     root.protocol('WM_DELETE_WINDOW', app.on_close)

@@ -8,17 +8,48 @@ from tkinter import ttk, messagebox
 import urllib.request
 
 # ============ 常量 ============
-LLAMA_DIR     = r'L:\OpenClaw\llama'
+# 路径配置（paths.json 可自定义，重装系统后一键复原的依据）
+_PATHS_CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'paths.json')
+_DEFAULT_PATHS = {
+    'llama_dir':      r'L:\OpenClaw\llama',
+    'comfy_root':     r'L:\OpenClaw\ComfyUI',
+    'openclaw_data':  r'L:\OpenClaw\OpenClawData',
+    'openclaw_npm':   r'L:\OpenClaw\npm',
+    'node_exe':       r'C:\Program Files\nodejs\node.exe',
+    'tailscale_exe':  r'C:\Program Files\Tailscale\tailscale.exe',
+}
+
+def _load_paths():
+    p = dict(_DEFAULT_PATHS)
+    try:
+        if os.path.isfile(_PATHS_CFG):
+            with io.open(_PATHS_CFG, 'r', encoding='utf-8') as f:
+                p.update(json.load(f))
+    except Exception:
+        pass
+    return p
+
+def _save_paths(p):
+    try:
+        with io.open(_PATHS_CFG, 'w', encoding='utf-8', newline='\n') as f:
+            json.dump(p, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+_PATHS = _load_paths()
+LLAMA_DIR     = _PATHS['llama_dir']
 MODELS_DIR    = os.path.join(LLAMA_DIR, 'models')
 LLAMA_SERVER  = os.path.join(LLAMA_DIR, 'llama-server.exe')
-NODE_EXE      = r'C:\Program Files\nodejs\node.exe'
+NODE_EXE      = _PATHS['node_exe']
 if not os.path.isfile(NODE_EXE):
     NODE_EXE = os.path.join(r'L:\OpenClaw\node', 'node.exe')
-_PORTABLE_NPM = r'L:\OpenClaw\npm'
+_PORTABLE_NPM = _PATHS['openclaw_npm']
 OPENCLAW_MJS  = os.path.join(_PORTABLE_NPM, r'node_modules\openclaw\openclaw.mjs')
 if not os.path.isfile(OPENCLAW_MJS):
     OPENCLAW_MJS = os.path.join(os.environ['APPDATA'], r'npm\node_modules\openclaw\openclaw.mjs')
-CONFIG_PATH   = r'L:\OpenClaw\OpenClawData\openclaw.json'
+CONFIG_PATH   = os.path.join(_PATHS['openclaw_data'], 'openclaw.json')
+TAILSCALE_EXE = _PATHS['tailscale_exe']
 PORT_LLM      = 8080
 PORT_GW       = 18789
 DASH_URL      = f'http://127.0.0.1:{PORT_GW}/'
@@ -48,9 +79,10 @@ def gw_running():
     return http_ok(f'http://127.0.0.1:{PORT_GW}/')
 
 COMFY_PORT = 8189
-COMFY_BAT  = r'L:\OpenClaw\ComfyUI\start_comfy.bat'
-COMFY_PY   = r'L:\OpenClaw\ComfyUI\python_embeded\python.exe'
-COMFY_DIR  = r'L:\OpenClaw\ComfyUI\ComfyUI'
+COMFY_ROOT = _PATHS['comfy_root']
+COMFY_BAT  = os.path.join(COMFY_ROOT, 'start_comfy.bat')
+COMFY_PY   = os.path.join(COMFY_ROOT, 'python_embeded', 'python.exe')
+COMFY_DIR  = os.path.join(COMFY_ROOT, 'ComfyUI')
 LOG_DIR    = r'L:\OpenClaw\OpenClawData\console\logs'
 LLAMA_LOG  = os.path.join(LOG_DIR, 'llama.log')
 COMFY_LOG  = os.path.join(LOG_DIR, 'comfyui.log')
@@ -355,7 +387,8 @@ class App:
         self._log_buffers = {'console': [], 'llm': [], 'comfy': []}
         self._log_texts = {}
         self._tail_pos = {}
-        self._tails_on = False
+        self._tails_on = True
+        self._tail_started = set()
         self._mag_last = None
         self._mag_t = 0
 
@@ -363,9 +396,10 @@ class App:
         self._build_ui()
         self._refresh_models_combo()
 
-        # 状态轮询
+        # 状态轮询 + 日志尾随（程序启动即开始，日志常驻缓冲）
         self._polling = True
         threading.Thread(target=self._poll_loop, daemon=True).start()
+        self._start_tails()
 
     # ---------- 样式 ----------
     def _build_style(self):
@@ -546,6 +580,40 @@ class App:
         self.btn_copy_key.grid(row=2, column=3, sticky='we', padx=(0, 10), pady=(4, 10))
         p2.columnconfigure(2, weight=1)
 
+        # ===== 面板2.5：广域网（Tailscale 远程访问 / 一键复原）=====
+        p2w = ttk.Frame(root, style='Panel.TFrame')
+        p2w.pack(fill='x', padx=12, pady=6)
+        ttk.Label(p2w, text='广域网远程访问（Tailscale）', style='Panel.TLabel',
+                  font=('Microsoft YaHei UI', 11, 'bold')).grid(row=0, column=0, columnspan=6, sticky='w', padx=10, pady=(10, 4))
+        self.wan_info = tk.StringVar(value='未检测 · 点「一键复原广域网」自动配置')
+        ttk.Label(p2w, textvariable=self.wan_info, style='Dim.TLabel').grid(row=1, column=0, columnspan=6, sticky='w', padx=10, pady=4)
+        self.btn_wan_restore = ttk.Button(p2w, text='🔧 一键复原广域网', style='Accent.TButton', command=self.wan_restore)
+        self.btn_wan_restore.grid(row=2, column=0, sticky='we', padx=10, pady=(4, 10))
+        self.btn_wan_copy = ttk.Button(p2w, text='复制远程地址', command=self.wan_copy_url)
+        self.btn_wan_copy.grid(row=2, column=1, sticky='we', padx=(0, 6), pady=(4, 10))
+        self.btn_wan_open = ttk.Button(p2w, text='打开远程地址', command=self.wan_open_url)
+        self.btn_wan_open.grid(row=2, column=2, sticky='we', padx=(0, 10), pady=(4, 10))
+        p2w.columnconfigure(3, weight=1)
+
+        # ===== 面板2.6：安装路径设置（重装系统后复原）=====
+        p2p = ttk.Frame(root, style='Panel.TFrame')
+        p2p.pack(fill='x', padx=12, pady=6)
+        ttk.Label(p2p, text='安装路径设置（重装系统后在此改路径，保存即复原）', style='Panel.TLabel',
+                  font=('Microsoft YaHei UI', 11, 'bold')).grid(row=0, column=0, columnspan=5, sticky='w', padx=10, pady=(10, 4))
+        self.path_vars = {}
+        _row = 1
+        for key, label in [('llama_dir', 'LLM 模型目录'), ('comfy_root', 'ComfyUI 根目录'), ('openclaw_data', 'OpenClaw 数据目录')]:
+            ttk.Label(p2p, text=label, style='Panel.TLabel').grid(row=_row, column=0, sticky='w', padx=(10, 4), pady=3)
+            v = tk.StringVar(value=_PATHS.get(key, ''))
+            self.path_vars[key] = v
+            ttk.Entry(p2p, textvariable=v, width=46).grid(row=_row, column=1, columnspan=3, sticky='we', padx=4, pady=3)
+            ttk.Button(p2p, text='浏览…', width=6,
+                       command=lambda k=key, vv=v: self._browse_path(k, vv)).grid(row=_row, column=4, sticky='we', padx=(0, 10), pady=3)
+            _row += 1
+        ttk.Button(p2p, text='保存路径并应用', style='Accent.TButton',
+                   command=self.save_paths_ui).grid(row=_row, column=1, columnspan=3, sticky='we', padx=4, pady=(6, 10))
+        p2p.columnconfigure(3, weight=1)
+
         # ===== 面板3：开机自启 =====
         p3 = ttk.Frame(root, style='Panel.TFrame')
         p3.pack(fill='x', padx=12, pady=6)
@@ -612,17 +680,24 @@ class App:
             buf.append(line)
             if len(buf) > 3000:
                 buf[:] = buf[-3000:]
-            t = getattr(self, '_log_texts', {}).get(key)
-            if t is not None:
-                try:
-                    t.configure(state='normal')
-                    t.insert('end', line + '\n')
-                    t.see('end')
-                    t.configure(state='disabled')
-                except Exception:
-                    pass
             if key == 'console':
                 self._log_buffer = bufs['console']
+        # 控件更新统一调度到主线程（tail 线程等调用方不直接碰 tkinter）
+        try:
+            self.root.after(0, lambda: self._log_insert(key, line))
+        except Exception:
+            pass
+
+    def _log_insert(self, key, line):
+        t = getattr(self, '_log_texts', {}).get(key)
+        if t is not None:
+            try:
+                t.configure(state='normal')
+                t.insert('end', line + '\n')
+                t.see('end')
+                t.configure(state='disabled')
+            except Exception:
+                pass
 
     # ---------- 状态灯 ----------
     def _set_lamp(self, canvas, on, color=None):
@@ -855,11 +930,11 @@ class App:
                     t.insert('end', line + '\n')
                 t.configure(state='disabled')
                 t.see('end')
-        self._start_tails()
+        # 日志缓冲已常驻，无需重复启动尾随线程
 
     def close_log_window(self):
         self._logwin_magnet_on = False
-        self._tails_on = False
+        # 日志尾随线程保持运行（缓冲持续积累），仅关闭窗口
         win = getattr(self, 'log_win', None)
         if win is not None:
             try:
@@ -1400,11 +1475,20 @@ class App:
             pass
 
     def _start_tail(self, path, key):
-        """后台线程：增量读日志文件尾，写入对应页签缓冲"""
+        """后台线程：先回填日志文件尾部若干行，再增量读新日志，写入对应页签缓冲"""
+        if key in getattr(self, '_tail_started', set()):
+            return
+        self._tail_started.add(key)
         def run():
             pos = 0
             try:
                 if os.path.isfile(path):
+                    with io.open(path, 'r', encoding='utf-8', errors='replace') as f:
+                        data = f.read()
+                    lines = data.splitlines()
+                    for line in lines[-400:]:
+                        if line.strip():
+                            self.log(line[:300], key)
                     pos = os.path.getsize(path)
             except Exception:
                 pos = 0
@@ -1534,11 +1618,113 @@ class App:
         self.log('⚠ ComfyUI 180 秒未就绪，请打开日志窗口查看 ComfyUI 页签')
 
     # ---------- 网关 ----------
+    # ---------- 广域网（Tailscale）与路径设置 ----------
+    def _browse_path(self, key, var):
+        try:
+            import tkinter.filedialog as fd
+            initial = var.get() or _DEFAULT_PATHS.get(key, '')
+            d = fd.askdirectory(initialdir=initial if os.path.isdir(initial) else os.path.dirname(initial))
+            if d:
+                var.set(d)
+        except Exception as e:
+            self.log('浏览路径失败: ' + str(e))
+
+    def save_paths_ui(self):
+        try:
+            p = dict(_DEFAULT_PATHS)
+            p.update({k: v.get().strip().rstrip('\\/') for k, v in self.path_vars.items()})
+            if _save_paths(p):
+                self.log('✅ 路径已保存到 paths.json（重启控制台后生效）')
+                messagebox.showinfo('路径设置', '路径已保存，重启控制台后生效。\n重装系统后改完路径，点「一键复原广域网」即可复原。')
+            else:
+                messagebox.showerror('路径设置', '保存失败，请检查目录权限')
+        except Exception as e:
+            self.log('保存路径失败: ' + str(e))
+
+    def _wan_hostname(self):
+        exe = TAILSCALE_EXE
+        if not os.path.isfile(exe):
+            self.log('未找到 Tailscale，请先安装（winget install Tailscale.Tailscale）')
+            return ''
+        try:
+            r = subprocess.run([exe, 'status', '--json'], capture_output=True, text=True,
+                               timeout=15, encoding='utf-8', errors='replace')
+            j = json.loads(r.stdout or '{}')
+            dns = ((j.get('Self') or {}).get('DNSName') or '').rstrip('.')
+            return 'https://' + dns + '/' if dns else ''
+        except Exception as e:
+            self.log('读取 Tailscale 地址失败: ' + str(e))
+            return ''
+
+    def wan_copy_url(self):
+        host = self._wan_hostname()
+        if host:
+            self.root.clipboard_clear(); self.root.clipboard_append(host)
+            self.log('已复制远程地址: ' + host)
+
+    def wan_open_url(self):
+        host = self._wan_hostname()
+        if host:
+            webbrowser.open(host)
+
+    def wan_restore(self):
+        """一键复原广域网：检查 Tailscale -> 配置 serve（网关根路径 + ComfyUI /comfy）"""
+        def work():
+            self.log('🔧 一键复原广域网…')
+            exe = TAILSCALE_EXE
+            if not os.path.isfile(exe):
+                self.log('❌ 未找到 Tailscale，请先安装：winget install Tailscale.Tailscale')
+                self.wan_info.set('未安装 Tailscale')
+                return
+            try:
+                r = subprocess.run([exe, 'status'], capture_output=True, text=True, timeout=15,
+                                   encoding='utf-8', errors='replace')
+                s = (r.stdout + r.stderr)
+                if 'stopped' in s.lower() or 'starting' in s.lower() or 'NoState' in s:
+                    self.log('Tailscale 未连接，尝试拉起…')
+                    subprocess.run([exe, 'up'], capture_output=True, text=True, timeout=30)
+                    time.sleep(6)
+            except Exception as e:
+                self.log('检查 Tailscale 失败: ' + str(e))
+            for args in ([exe, 'serve', '--bg', str(PORT_GW)],
+                         [exe, 'serve', '--bg', '--https=443', '--set-path=/comfy', 'http://127.0.0.1:8188']):
+                try:
+                    subprocess.run(args, capture_output=True, text=True, timeout=30)
+                except Exception as e:
+                    self.log('serve 配置失败: ' + str(e))
+            host = self._wan_hostname()
+            if host:
+                r = subprocess.run([exe, 'serve', 'status'], capture_output=True, text=True, timeout=15,
+                                   encoding='utf-8', errors='replace')
+                if 'No serve config' in (r.stdout or ''):
+                    self.wan_info.set('Serve 未启用，请去 Tailscale 网页启用')
+                    self.log('⚠ Serve 未启用：请打开 https://login.tailscale.com/f/serve 启用后重试')
+                else:
+                    self.wan_info.set('已启用 · ' + host + '（/comfy 为 ComfyUI）')
+                    self.log('✅ 广域网已复原：' + host + ' · ComfyUI: /comfy')
+            else:
+                self.wan_info.set('配置失败（Tailscale 未登录）')
+                self.log('❌ 广域网配置失败：Tailscale 未登录或未启用 Serve')
+        threading.Thread(target=work, daemon=True).start()
+
     def start_gw(self):
         self.log('启动网关...')
-        code, out = run_cli(['gateway', 'start'])
-        self.log((out or 'OK').strip()[:300])
-        time.sleep(2)
+        # CLI 服务管理命令（gateway start）在非默认 state dir 下会被拒绝，
+        # 改用 gateway.cmd 直启（与「一键恢复」同路径，绕开该限制）
+        try:
+            gw_logf = io.open(os.path.join(LOG_DIR, 'gateway.log'), 'a',
+                              encoding='utf-8', errors='replace', buffering=1)
+            env = dict(os.environ)
+            env['OPENCLAW_STATE_DIR'] = r'L:\OpenClaw\OpenClawData'
+            env['PATH'] = os.path.dirname(NODE_EXE) + ';' + env.get('PATH', '')
+            subprocess.Popen(['cmd', '/c', r'L:\OpenClaw\OpenClawData\gateway.cmd'],
+                             stdout=gw_logf, stderr=subprocess.STDOUT,
+                             creationflags=subprocess.CREATE_NO_WINDOW, env=env)
+            self.log('已后台启动网关（gateway.cmd）...')
+        except Exception as e:
+            self.log('网关启动异常: ' + str(e))
+            return
+        time.sleep(3)
         if gw_running():
             self.log('✅ 网关运行中')
         else:
@@ -1546,8 +1732,23 @@ class App:
 
     def stop_gw(self):
         self.log('停止网关...')
-        code, out = run_cli(['gateway', 'stop'])
-        self.log((out or 'OK').strip()[:300])
+        # CLI 服务管理命令（gateway stop）在非默认 state dir 下会被拒绝，
+        # 直接终止监听网关端口的进程（含子进程树）
+        try:
+            out = subprocess.run(
+                ['powershell', '-NoProfile', '-Command',
+                 f'(Get-NetTCPConnection -LocalPort {PORT_GW} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess)'],
+                capture_output=True, text=True, timeout=15, encoding='utf-8', errors='replace',
+                creationflags=subprocess.CREATE_NO_WINDOW).stdout.strip()
+            pids = [int(x) for x in out.split() if x.isdigit()]
+            if pids:
+                for pid in pids:
+                    stop_pid(pid)
+                self.log('✅ 网关已停止（PID %s）' % pids)
+            else:
+                self.log('网关未在运行')
+        except Exception as e:
+            self.log('停止网关异常: ' + str(e))
 
     def open_dashboard(self):
         url = DASH_URL

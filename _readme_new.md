@@ -1,4 +1,4 @@
-# OpenClaw 控制台
+﻿# OpenClaw 控制台
 
 本地 AI 环境一站式管理控制台：管理 **llama.cpp（LLM 推理）**、**OpenClaw Gateway（18789）**、**ComfyUI（生图 8188）**，并打通 webchat / 微信通道的本地生图链路。
 
@@ -52,3 +52,4 @@ python apply_openclaw_patches.py
 1. 安装 Node.js（≥18），保持路径一致或修改 `paths.json`
 2. 把 `OpenClawData` / `llama` / ComfyUI 放在原路径（或改 `paths.json`）
 3. 启动控制台 → 设置页改路径 → 保存 → 模型页一键启动
+

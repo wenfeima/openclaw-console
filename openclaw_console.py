@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-OpenClaw 控制台 v2.5
+OpenClaw 控制台 v2.6
 管理本地模型服务(llama-server) + OpenClaw Gateway + 控制台入口
 v2.3: 修网关启动走 --task-supervisor 重启循环；修 RAMCleanup 参数 400；生图模型列表异步加载不再卡启动；
       单实例锁；开机自启 mmproj 覆盖参数；清理显存链式挂 RAMCleanup；路径跟随配置
-v2.4: 一键恢复不再覆盖用户自定义路径（comfy_root 迁到 L:\ComfyUI 等）；修复"生图连接的不是选择的模型"——
+v2.4: 一键恢复不再覆盖用户自定义路径（comfy_root 迁到 L:/ComfyUI 等）；修复"生图连接的不是选择的模型"——
       控制台与 MCP 统一按 paths.json 实时读取目录，改路径后无需重启网关即可生效
 v2.5: 生图链路完全修复脚本（apply_openclaw_patches.py）：OpenClaw 升级覆盖 dist 补丁后一键重打；
       路径保存后自动重打媒体白名单（跟随新 comfy_root），解决"生图成功但前端不显示图片"
+v2.6: 日志窗口新增「网关」页签（gateway.log 实时尾随）；主窗口顶部新增全局硬件状态栏
+      （CPU/内存/GPU/显存/温度，切任意页签可见）
 """
 import os, sys, json, time, glob, io, subprocess, threading, webbrowser, tkinter as tk
 from tkinter import ttk, messagebox
@@ -310,6 +312,7 @@ COMFY_DIR  = os.path.join(COMFY_ROOT, 'ComfyUI')
 LOG_DIR    = r'L:\OpenClaw\OpenClawData\console\logs'
 LLAMA_LOG  = os.path.join(LOG_DIR, 'llama.log')
 COMFY_LOG  = os.path.join(LOG_DIR, 'comfyui.log')
+GATEWAY_LOG = os.path.join(LOG_DIR, 'gateway.log')
 WF_PORT    = 8756
 WF_HTML    = os.path.join(_BASE_DIR, 'workflow_editor.html')
 WF_DIR     = os.path.join(_BASE_DIR, 'workflows')
@@ -604,7 +607,7 @@ def stop_pid(pid):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title('OpenClaw 控制台 v2.4')
+        root.title('OpenClaw 控制台 v2.6')
         root.geometry('980x540')
         root.minsize(760, 440)
         root.configure(bg='#2b2b2b')
@@ -616,7 +619,7 @@ class App:
         self.log_win = None
         self._log_win_text = None
         self._log_buffer = []
-        self._log_buffers = {'console': [], 'llm': [], 'comfy': []}
+        self._log_buffers = {'console': [], 'llm': [], 'comfy': [], 'gw': []}
         self._log_texts = {}
         self._tail_pos = {}
         self._tails_on = True
@@ -724,9 +727,16 @@ class App:
         self.btn_all_start = ttk.Button(top, text='🚀 启动所有', style='TopAccent.TButton', command=self.start_all)
         self.btn_all_start.pack(side='right', padx=(0, 6))
 
+        # ===== 全局硬件状态栏（所有页签可见）=====
+        hwbar = tk.Frame(root, bg=c['panel'])
+        hwbar.pack(fill='x', padx=10, pady=(0, 2))
+        self.lbl_hw = tk.Label(hwbar, text='系统 --', bg=c['panel'], fg=c['dim'],
+                               font=('Microsoft YaHei UI', 9), anchor='w')
+        self.lbl_hw.pack(side='left', padx=8, pady=3)
+
         # ===== 主 Notebook（翻页式布局，适配小屏）=====
         nb = ttk.Notebook(root)
-        nb.pack(fill='both', expand=True, padx=10, pady=(30, 10))
+        nb.pack(fill='both', expand=True, padx=10, pady=(4, 10))
         st = ttk.Style()
         st.configure('TNotebook', background=c['bg'], borderwidth=0, tabmargins=(4, 4, 4, 0))
         st.configure('TNotebook.Tab', background=c['panel'], foreground=c['fg'],
@@ -801,12 +811,6 @@ class App:
         self.btn_wf_refresh.grid(row=5, column=3, sticky='w')
         self._refresh_gen_workflows(initial=True)
 
-        # 系统负载监控行（仅负载显示）
-        sys_row = tk.Frame(tab_model, bg=c['panel'])
-        sys_row.grid(row=7, column=0, columnspan=6, sticky='we', padx=10, pady=(0, 10))
-        ttk.Label(sys_row, text='系统', style='Panel.TLabel').pack(side='left', padx=(0, 6))
-        self.lbl_sys = ttk.Label(sys_row, text='--', style='Panel.TLabel')
-        self.lbl_sys.pack(side='left')
         tab_model.columnconfigure(1, weight=1)
 
         # ----- Tab 2：ComfyUI（页签名：生图）-----
@@ -991,7 +995,7 @@ class App:
 
         # ===== 日志区 =====（已移至独立磁吸窗口，顶部“日志”按钮打开）
 
-        self.log('OpenClaw 控制台 v2.4 启动')
+        self.log('OpenClaw 控制台 v2.6 启动')
         self.log(f'模型目录: {MODELS_DIR}')
         self.log(f'网关: {DASH_URL}')
 
@@ -1014,7 +1018,7 @@ class App:
         with log_lock:
             bufs = getattr(self, '_log_buffers', None)
             if bufs is None:
-                self._log_buffers = {'console': [], 'llm': [], 'comfy': []}
+                self._log_buffers = {'console': [], 'llm': [], 'comfy': [], 'gw': []}
                 bufs = self._log_buffers
             buf = bufs.setdefault(key, [])
             buf.append(line)
@@ -1298,7 +1302,7 @@ class App:
         nb = ttk.Notebook(win)
         nb.pack(fill='both', expand=True, padx=8, pady=8)
         self._log_texts = {}
-        for key, label in [('console', '控制台'), ('llm', '模型 LLM'), ('comfy', 'ComfyUI')]:
+        for key, label in [('console', '控制台'), ('llm', '模型 LLM'), ('comfy', 'ComfyUI'), ('gw', '网关')]:
             page = tk.Frame(nb, bg='#1e1e1e')
             t = tk.Text(page, bg='#1e1e1e', fg='#c8c8c8', font=('Consolas', 9),
                         wrap='word', relief='flat', borderwidth=0, state='disabled')
@@ -2130,6 +2134,7 @@ class App:
         self._tails_on = True
         self._start_tail(LLAMA_LOG, 'llm')
         self._start_tail(COMFY_LOG, 'comfy')
+        self._start_tail(GATEWAY_LOG, 'gw')
 
     def _wait_llm_ready(self):
         for _ in range(180):
@@ -2660,8 +2665,6 @@ class App:
             time.sleep(2)
 
     def _update_sys(self, st):
-        if not hasattr(self, 'lbl_sys'):
-            return
         try:
             parts = []
             if st.get('cpu') is not None:
@@ -2673,7 +2676,11 @@ class App:
                 parts.append('GPU %d%%' % round(g['util']))
                 parts.append('显存 %.1f/%.1fGB' % (g['used_mb'] / 1024.0, g['total_mb'] / 1024.0))
                 parts.append('温度 %d°' % round(g['temp']))
-            self.lbl_sys.config(text='  '.join(parts) if parts else '--')
+            text = '系统 ' + ('  '.join(parts) if parts else '--')
+            if hasattr(self, 'lbl_hw'):
+                self.lbl_hw.config(text=text)
+            if hasattr(self, 'lbl_sys'):
+                self.lbl_sys.config(text=text)
         except Exception:
             pass
 

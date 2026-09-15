@@ -1,6 +1,6 @@
 {
   "llama_dir": "L:\\OpenClaw\\llama",
-  "comfy_root": "L:\\OpenClaw\\ComfyUI",
+  "comfy_root": "L:/ComfyUI",
   "openclaw_data": "L:\\OpenClaw\\OpenClawData",
   "openclaw_npm": "L:\\OpenClaw\\npm",
   "node_exe": "C:\\Program Files\\nodejs\\node.exe",

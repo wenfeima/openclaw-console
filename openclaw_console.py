@@ -1,11 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-OpenClaw 控制台 v2.2
+OpenClaw 控制台 v2.5
 管理本地模型服务(llama-server) + OpenClaw Gateway + 控制台入口
+v2.3: 修网关启动走 --task-supervisor 重启循环；修 RAMCleanup 参数 400；生图模型列表异步加载不再卡启动；
+      单实例锁；开机自启 mmproj 覆盖参数；清理显存链式挂 RAMCleanup；路径跟随配置
+v2.4: 一键恢复不再覆盖用户自定义路径（comfy_root 迁到 L:\ComfyUI 等）；修复"生图连接的不是选择的模型"——
+      控制台与 MCP 统一按 paths.json 实时读取目录，改路径后无需重启网关即可生效
+v2.5: 生图链路完全修复脚本（apply_openclaw_patches.py）：OpenClaw 升级覆盖 dist 补丁后一键重打；
+      路径保存后自动重打媒体白名单（跟随新 comfy_root），解决"生图成功但前端不显示图片"
 """
 import os, sys, json, time, glob, io, subprocess, threading, webbrowser, tkinter as tk
 from tkinter import ttk, messagebox
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs, quote
 
 # ============ 常量 ============
 # 路径配置（paths.json 可自定义，重装系统后一键复原的依据）
@@ -48,6 +56,27 @@ def _save_paths(p):
     except Exception:
         return False
 
+def _apply_paths(p):
+    """保存后即时更新全局路径常量（无需重启控制台）"""
+    global LLAMA_DIR, MODELS_DIR, LLAMA_SERVER, NODE_EXE, _PORTABLE_NPM, OPENCLAW_MJS
+    global CONFIG_PATH, TAILSCALE_EXE, COMFY_ROOT, COMFY_BAT, COMFY_PY, COMFY_DIR
+    LLAMA_DIR     = p['llama_dir']
+    MODELS_DIR    = os.path.join(LLAMA_DIR, 'models')
+    LLAMA_SERVER  = os.path.join(LLAMA_DIR, 'llama-server.exe')
+    NODE_EXE      = p['node_exe']
+    if not os.path.isfile(NODE_EXE):
+        NODE_EXE = os.path.join(r'L:\OpenClaw\node', 'node.exe')
+    _PORTABLE_NPM = p['openclaw_npm']
+    OPENCLAW_MJS  = os.path.join(_PORTABLE_NPM, r'node_modules\openclaw\openclaw.mjs')
+    if not os.path.isfile(OPENCLAW_MJS):
+        OPENCLAW_MJS = os.path.join(os.environ['APPDATA'], r'npm\node_modules\openclaw\openclaw.mjs')
+    CONFIG_PATH   = os.path.join(p['openclaw_data'], 'openclaw.json')
+    TAILSCALE_EXE = p['tailscale_exe']
+    COMFY_ROOT    = p['comfy_root']
+    COMFY_BAT     = os.path.join(COMFY_ROOT, 'start_comfy.bat')
+    COMFY_PY      = os.path.join(COMFY_ROOT, 'python_embeded', 'python.exe')
+    COMFY_DIR     = os.path.join(COMFY_ROOT, 'ComfyUI')
+
 _PATHS = _load_paths()
 LLAMA_DIR     = _PATHS['llama_dir']
 MODELS_DIR    = os.path.join(LLAMA_DIR, 'models')
@@ -80,6 +109,190 @@ def http_ok(url, timeout=3):
     except Exception:
         return False
 
+# ============ 工作流编辑器 HTTP 服务 ============
+import re as _re
+def _wf_proxy(self, sub, body=None, timeout=30):
+    """把编辑器请求转发到 ComfyUI（解决浏览器跨域）"""
+    try:
+        url = 'http://127.0.0.1:%d%s' % (COMFY_PORT, sub)
+        if body is not None:
+            req = urllib.request.Request(url, data=body.encode('utf-8'),
+                                         headers={'Content-Type': 'application/json'})
+        else:
+            req = urllib.request.Request(url)
+        r = urllib.request.urlopen(req, timeout=timeout)
+        data = r.read()
+        self.send_response(r.status)
+        self.send_header('Content-Type', r.headers.get('Content-Type', 'application/json'))
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+    except Exception as e:
+        body = json.dumps({'error': str(e)}).encode('utf-8')
+        self.send_response(502)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+def _wf_object_info(self):
+    """object_info 带缓存：ComfyUI 在线拉取并存盘；离线用缓存兜底"""
+    cache_path = os.path.join(WF_DIR, 'object_info_cache.json')
+    try:
+        url = 'http://127.0.0.1:%d/object_info' % COMFY_PORT
+        r = urllib.request.urlopen(urllib.request.Request(url), timeout=20)
+        data = r.read()
+        try:
+            with io.open(cache_path, 'wb') as f:
+                f.write(data)
+        except Exception:
+            pass
+        self.send_response(r.status)
+        self.send_header('Content-Type', r.headers.get('Content-Type', 'application/json'))
+        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        self.wfile.write(data)
+    except Exception:
+        if os.path.isfile(cache_path):
+            with io.open(cache_path, 'rb') as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Object-Info-Source', 'cache')
+            self.end_headers()
+            self.wfile.write(data)
+        else:
+            body = json.dumps({'error': 'ComfyUI 离线且无缓存'}).encode('utf-8')
+            self.send_response(502)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+class WFHandler(BaseHTTPRequestHandler):
+    """工作流编辑器后端：服务 HTML / 读写 workflows / 代理 ComfyUI"""
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, body, ctype='application/json'):
+        if isinstance(body, str):
+            body = body.encode('utf-8')
+        self.send_response(code)
+        self.send_header('Content-Type', ctype + '; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except Exception:
+            pass
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+        qs = parse_qs(urlparse(self.path).query)
+        if path == '/':
+            try:
+                with io.open(WF_HTML, 'r', encoding='utf-8') as f:
+                    self._send(200, f.read(), 'text/html')
+            except Exception as e:
+                self._send(500, json.dumps({'error': str(e)}))
+        elif path == '/api/workflows':
+            files = []
+            if os.path.isdir(WF_DIR):
+                for dp, dns, fns in os.walk(WF_DIR):
+                    for fn in sorted(fns):
+                        if fn.endswith('.json') and not fn.endswith('.ui.json'):
+                            rel = os.path.relpath(os.path.join(dp, fn), WF_DIR).replace('\\', '/')
+                            files.append(rel)
+            files.sort()
+            self._send(200, json.dumps({'workflows': files}))
+        elif path == '/api/workflow':
+            name = (qs.get('name') or [''])[0]
+            fp = os.path.abspath(os.path.join(WF_DIR, name)) if name else ''
+            wf_abs = os.path.abspath(WF_DIR)
+            if not name or os.path.commonpath([wf_abs, fp]) != wf_abs or not os.path.isfile(fp):
+                self._send(404, json.dumps({'error': '工作流不存在'}))
+                return
+            try:
+                with io.open(fp, 'r', encoding='utf-8') as f:
+                    wf = json.load(f)
+                ui = {}
+                ufp = os.path.join(os.path.dirname(fp), os.path.splitext(os.path.basename(fp))[0] + '.ui.json')
+                if os.path.isfile(ufp):
+                    with io.open(ufp, 'r', encoding='utf-8') as f:
+                        ui = json.load(f)
+                self._send(200, json.dumps({'workflow': wf, 'ui': ui}))
+            except Exception as e:
+                self._send(500, json.dumps({'error': str(e)}))
+        elif path == '/api/comfy/object_info':
+            _wf_object_info(self)
+        elif path == '/api/comfy/history':
+            pid = (qs.get('prompt_id') or [''])[0]
+            _wf_proxy(self, '/history/' + quote(pid))
+        elif path == '/api/comfy/view':
+            fn = quote((qs.get('filename') or [''])[0])
+            sub = quote((qs.get('subfolder') or [''])[0])
+            typ = quote((qs.get('type') or ['output'])[0])
+            _wf_proxy(self, '/view?filename=%s&subfolder=%s&type=%s' % (fn, sub, typ))
+        elif path == '/api/status':
+            self._send(200, json.dumps({'comfy': comfy_alive(), 'port': COMFY_PORT}))
+        else:
+            self._send(404, json.dumps({'error': '404'}))
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        if path == '/api/workflow':
+            try:
+                body = json.loads(self.rfile.read(int(self.headers.get('Content-Length') or 0)).decode('utf-8'))
+                name = body.get('name', '')
+                if not name or not _re.match(r'^[\w\-/]+\.json$', name):
+                    self._send(400, json.dumps({'error': '名称只能含字母数字_-/并以 .json 结尾'}))
+                    return
+                fp = os.path.abspath(os.path.join(WF_DIR, name))
+                wf_abs = os.path.abspath(WF_DIR)
+                if os.path.commonpath([wf_abs, fp]) != wf_abs:
+                    self._send(400, json.dumps({'error': '非法路径'}))
+                    return
+                os.makedirs(os.path.dirname(fp), exist_ok=True)
+                with io.open(fp, 'w', encoding='utf-8', newline='\n') as f:
+                    json.dump(body.get('workflow', {}), f, ensure_ascii=False, indent=1)
+                ufp = os.path.join(os.path.dirname(fp), os.path.splitext(os.path.basename(fp))[0] + '.ui.json')
+                with io.open(ufp, 'w', encoding='utf-8', newline='\n') as f:
+                    json.dump(body.get('ui', {}), f, ensure_ascii=False, indent=1)
+                self._send(200, json.dumps({'ok': True}))
+            except Exception as e:
+                self._send(500, json.dumps({'error': str(e)}))
+        elif path == '/api/comfy/prompt':
+            body = self.rfile.read(int(self.headers.get('Content-Length') or 0)).decode('utf-8')
+            _wf_proxy(self, '/prompt', body=body, timeout=60)
+        else:
+            self._send(404, json.dumps({'error': '404'}))
+
+_wf_httpd = None
+
+def start_wf_server():
+    """启动工作流编辑器 HTTP 服务（127.0.0.1:8756）"""
+    global _wf_httpd
+    if _wf_httpd:
+        return True
+    try:
+        os.makedirs(WF_DIR, exist_ok=True)
+        _wf_httpd = ThreadingHTTPServer(('127.0.0.1', WF_PORT), WFHandler)
+        threading.Thread(target=_wf_httpd.serve_forever, daemon=True).start()
+        return True
+    except Exception as e:
+        _wf_httpd = None
+        return False
+
+def open_workflow_editor():
+    if not start_wf_server():
+        return '工作流服务启动失败'
+    webbrowser.open('http://127.0.0.1:%d/' % WF_PORT)
+    return '已打开工作流编辑器'
+
 def llama_running():
     # 双通道判活：HTTP 通算活；HTTP 忙（大 prompt 处理中）但端口在监听也算活
     if http_ok(f'http://127.0.0.1:{PORT_LLM}/v1/models', timeout=5):
@@ -89,7 +302,7 @@ def llama_running():
 def gw_running():
     return http_ok(f'http://127.0.0.1:{PORT_GW}/')
 
-COMFY_PORT = 8189
+COMFY_PORT = 8188
 COMFY_ROOT = _PATHS['comfy_root']
 COMFY_BAT  = os.path.join(COMFY_ROOT, 'start_comfy.bat')
 COMFY_PY   = os.path.join(COMFY_ROOT, 'python_embeded', 'python.exe')
@@ -97,6 +310,9 @@ COMFY_DIR  = os.path.join(COMFY_ROOT, 'ComfyUI')
 LOG_DIR    = r'L:\OpenClaw\OpenClawData\console\logs'
 LLAMA_LOG  = os.path.join(LOG_DIR, 'llama.log')
 COMFY_LOG  = os.path.join(LOG_DIR, 'comfyui.log')
+WF_PORT    = 8756
+WF_HTML    = os.path.join(_BASE_DIR, 'workflow_editor.html')
+WF_DIR     = os.path.join(_BASE_DIR, 'workflows')
 
 HW_PROFILE = os.path.join(_BASE_DIR, 'hw_profile.json')
 
@@ -235,7 +451,7 @@ def sys_stats():
             'gpu': gpu_stats()}
 
 def get_comfy_pid():
-    """查 8188 端口 ComfyUI 的 PID"""
+    """查 ComfyUI 端口（COMFY_PORT）的 PID"""
     try:
         out = subprocess.run(['powershell', '-NoProfile', '-Command',
             f'(Get-NetTCPConnection -LocalPort {COMFY_PORT} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess)'],
@@ -353,11 +569,14 @@ def list_models():
     return out
 
 def run_cli(args, timeout=120):
-    """调用 openclaw CLI（用系统 Node 24）"""
+    """调用 openclaw CLI（用系统 Node 24），显式带上 OPENCLAW_STATE_DIR 环境"""
     try:
+        env = dict(os.environ)
+        env.setdefault('OPENCLAW_STATE_DIR', os.path.dirname(CONFIG_PATH))
         r = subprocess.run([NODE_EXE, OPENCLAW_MJS] + args,
                            capture_output=True, text=True, timeout=timeout,
-                           encoding='utf-8', errors='replace', creationflags=subprocess.CREATE_NO_WINDOW)
+                           encoding='utf-8', errors='replace',
+                           creationflags=subprocess.CREATE_NO_WINDOW, env=env)
         return r.returncode, (r.stdout or '') + (r.stderr or '')
     except Exception as e:
         return -1, str(e)
@@ -385,10 +604,12 @@ def stop_pid(pid):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title('OpenClaw 控制台 v2.2')
+        root.title('OpenClaw 控制台 v2.4')
         root.geometry('980x540')
         root.minsize(760, 440)
         root.configure(bg='#2b2b2b')
+
+        start_wf_server()  # 工作流编辑器 HTTP 服务
 
         self.models = list_models()
         self.model_proc = None   # 本程序启动的 llama-server 进程
@@ -436,6 +657,7 @@ class App:
         style.configure('TLabel', background=c['bg'], foreground=c['fg'], font=('Microsoft YaHei UI', 10))
         style.configure('Panel.TLabel', background=c['panel'], foreground=c['fg'], font=('Microsoft YaHei UI', 10))
         style.configure('Dim.TLabel', background=c['panel'], foreground=c['dim'], font=('Microsoft YaHei UI', 9))
+        style.configure('TRadiobutton', background=c['panel'], foreground=c['fg'], font=('Microsoft YaHei UI', 10))
         style.configure('TButton', font=('Microsoft YaHei UI', 10), padding=(10, 4))
         # 顶栏小按钮（日志/启动所有/关闭所有）
         style.configure('Top.TButton', font=('Microsoft YaHei UI', 9), padding=(6, 1))
@@ -475,6 +697,12 @@ class App:
         top.pack(fill='x', padx=12, pady=(12, 6))
         tk.Label(top, text='OpenClaw 控制台', bg=c['bg'], fg=c['fg'],
                  font=('Microsoft YaHei UI', 14, 'bold')).pack(side='left')
+        # 最小化图标按钮：放标题右侧（不挤顶栏按钮区）
+        self.btn_min = tk.Button(top, text='—', command=self.root.iconify,
+                                 bg=c['bg'], fg=c['dim'], relief='flat', bd=0,
+                                 font=('Segoe UI', 12), cursor='hand2',
+                                 activebackground=c['panel'], activeforeground=c['fg'])
+        self.btn_min.pack(side='left', padx=(10, 0))
 
         # 状态灯区域（模型/网关/生图 三灯并排）
         lamp = tk.Frame(top, bg=c['bg'])
@@ -562,6 +790,17 @@ class App:
         self.lora_zimg_combo.bind('<<ComboboxSelected>>', lambda e: self._save_lora('zimg'))
         self._refresh_loras(initial=True)
 
+        # 生图工作流（选即保存，MCP 生图时读取；列出 workflows 目录全部模板含自建）
+        self.gen_wf_var = tk.StringVar()
+        self.gen_wf_combo = ttk.Combobox(tab_model, textvariable=self.gen_wf_var, width=34,
+                                         style='Dark.TCombobox')
+        ttk.Label(tab_model, text='生图工作流', style='Panel.TLabel').grid(row=5, column=0, sticky='w', padx=(10, 8), pady=(0, 8))
+        self.gen_wf_combo.grid(row=5, column=1, columnspan=2, sticky='we', padx=(6, 8), pady=(0, 8))
+        self.gen_wf_combo.bind('<<ComboboxSelected>>', self._save_gen_workflow)
+        self.btn_wf_refresh = ttk.Button(tab_model, text='刷新', width=4, command=self._refresh_gen_workflows)
+        self.btn_wf_refresh.grid(row=5, column=3, sticky='w')
+        self._refresh_gen_workflows(initial=True)
+
         # 系统负载监控行（仅负载显示）
         sys_row = tk.Frame(tab_model, bg=c['panel'])
         sys_row.grid(row=7, column=0, columnspan=6, sticky='we', padx=10, pady=(0, 10))
@@ -582,8 +821,9 @@ class App:
         self.btn_comfy_restart.pack(side='left')
         self.btn_comfy_stop = ttk.Button(comfy_row, text='■  停止', style='Stop.TButton', command=self.stop_comfy)
         self.btn_comfy_stop.pack(side='left', padx=(8, 0))
+        ttk.Button(comfy_row, text='🛠 工作流', command=open_workflow_editor).pack(side='left', padx=(8, 0))
         # 远程地址做成可点击超链接
-        self.comfy_url_lbl = tk.Label(comfy_row, text='远程: https://game.tail8c09f5.ts.net:8443/comfy',
+        self.comfy_url_lbl = tk.Label(comfy_row, text='远程: https://game.tail8c09f5.ts.net:8443',
                                       bg='#383838', fg='#6cb4ee', font=('Microsoft YaHei UI', 9),
                                       cursor='hand2')
         self.comfy_url_lbl.pack(side='right', padx=10)
@@ -601,6 +841,22 @@ class App:
         self.btn_comfy_output = ttk.Button(comfy_tools_row, text='生成文件夹', command=self.open_output_dir)
         self.btn_comfy_output.pack(side='left', padx=(8, 0))
         tab_comfy.columnconfigure(1, weight=1)
+
+        # 生图方式（固定 ComfyUI / 自动选择）——禁内置 image_generate 防弹工具选择框
+        ttk.Separator(tab_comfy, orient='horizontal').grid(row=3, column=0, columnspan=6, sticky='we', padx=10, pady=(8, 6))
+        ttk.Label(tab_comfy, text='生图方式', style='Panel.TLabel',
+                  font=('Microsoft YaHei UI', 11, 'bold')).grid(row=4, column=0, columnspan=6, sticky='w', padx=10, pady=(2, 4))
+        self.gen_mode_var = tk.StringVar(value=self._gen_mode_current())
+        gf = ttk.Frame(tab_comfy, style='Panel.TFrame')
+        gf.grid(row=5, column=0, columnspan=6, sticky='w', padx=10, pady=2)
+        ttk.Radiobutton(gf, text='固定 ComfyUI（推荐）', value='comfy', variable=self.gen_mode_var,
+                        style='TRadiobutton').pack(side='left', padx=(0, 16))
+        ttk.Radiobutton(gf, text='自动选择（允许内置 image_generate）', value='auto', variable=self.gen_mode_var,
+                        style='TRadiobutton').pack(side='left')
+        ttk.Label(tab_comfy, text='固定 ComfyUI：禁用内置生图工具选择器，微信/各通道生图直接走本地 ComfyUI（comfyui__generate_image）',
+                  style='Dim.TLabel').grid(row=6, column=0, columnspan=6, sticky='w', padx=10, pady=2)
+        ttk.Button(tab_comfy, text='保存生图方式', style='Accent.TButton',
+                   command=self.save_gen_mode).grid(row=7, column=0, sticky='we', padx=10, pady=(6, 10))
 
         # ----- Tab 3：网关 & 广域网 -----
         tab_gw = ttk.Frame(nb, style='Panel.TFrame')
@@ -707,7 +963,7 @@ class App:
         env_row = ttk.Frame(tab_dbg)
         env_row.grid(row=1, column=0, columnspan=10, sticky='we', padx=10, pady=(0, 4))
         kinds = [('node', 'Node.js'), ('openclaw', 'OpenClaw'), ('llama', 'llama.cpp'),
-                 ('models', '模型文件'), ('cfg', '网关配置')]
+                 ('models', '模型文件'), ('cfg', '网关配置'), ('tailscale', 'Tailscale')]
         for i, (kind, label) in enumerate(kinds):
             f = ttk.Frame(env_row)
             f.grid(row=i // 3, column=i % 3, padx=(0, 18), pady=2, sticky='w')
@@ -728,10 +984,14 @@ class App:
         ttk.Button(dbg_row, text='测试模型API', command=self.test_llm_api).pack(side='left', padx=(0, 8))
         ttk.Button(dbg_row, text='测试网关', command=self.test_gw).pack(side='left', padx=(0, 8))
         ttk.Button(dbg_row, text='复制日志', command=self.copy_log).pack(side='left', padx=(0, 8))
+        dbg_row2 = ttk.Frame(tab_dbg)
+        dbg_row2.grid(row=4, column=0, columnspan=10, sticky='we', padx=10, pady=(0, 10))
+        ttk.Button(dbg_row2, text='🛜 启动Tailscale', command=self.tailscale_start).pack(side='left', padx=(0, 8))
+        ttk.Button(dbg_row2, text='⚙️ Tailscale一键', style='Accent.TButton', command=self.tailscale_onekey).pack(side='left', padx=(0, 8))
 
         # ===== 日志区 =====（已移至独立磁吸窗口，顶部“日志”按钮打开）
 
-        self.log('OpenClaw 控制台 v2.2 启动')
+        self.log('OpenClaw 控制台 v2.4 启动')
         self.log(f'模型目录: {MODELS_DIR}')
         self.log(f'网关: {DASH_URL}')
 
@@ -799,6 +1059,14 @@ class App:
                         n_models += 1
             res['models'] = n_models > 0
             res['cfg'] = os.path.isfile(CONFIG_PATH) and bool(gw_token())
+            try:
+                env = dict(os.environ)
+                env['PATH'] = r'C:\Program Files\Tailscale;' + env.get('PATH', '')
+                r = subprocess.run([TAILSCALE_EXE, 'status'], capture_output=True, text=True,
+                                   timeout=10, env=env, creationflags=0x08000000)
+                res['tailscale'] = r.returncode == 0
+            except Exception:
+                res['tailscale'] = False
             return res
         def apply(res):
             for kind, ok in res.items():
@@ -813,6 +1081,8 @@ class App:
                     btn.config(text='建目录', state='normal')
                 elif kind == 'cfg':
                     btn.config(text='查看', state='normal')
+                elif kind == 'tailscale':
+                    btn.config(text='启动', state='normal')
                 else:
                     btn.config(text='安装', state='normal')
                 self._set_lamp(lamp, ok, color=self.colors['green'] if ok else self.colors['red'])
@@ -833,6 +1103,9 @@ class App:
             except Exception as e:
                 self.log('打开配置目录失败: ' + str(e))
             return
+        if kind == 'tailscale':
+            self.tailscale_start()
+            return
         ok = {'node': os.path.isfile(NODE_EXE),
               'openclaw': os.path.isfile(OPENCLAW_MJS),
               'llama': os.path.isfile(LLAMA_SERVER)}.get(kind, False)
@@ -847,6 +1120,47 @@ class App:
             'openclaw': self._install_openclaw,
             'llama': self._install_llama,
         }[kind], daemon=True).start()
+
+    # ---------- Tailscale ----------
+    def _ts(self, args, timeout=30):
+        try:
+            env = dict(os.environ)
+            env['PATH'] = r'C:\Program Files\Tailscale;' + env.get('PATH', '')
+            r = subprocess.run([TAILSCALE_EXE] + args, capture_output=True, text=True,
+                               timeout=timeout, env=env, creationflags=0x08000000)
+            return r.returncode == 0, (r.stdout + r.stderr).strip()
+        except Exception as e:
+            return False, str(e)
+
+    def tailscale_start(self):
+        """启动 Tailscale（tailscale up 连接 tailnet）"""
+        def work():
+            self.log('启动 Tailscale…')
+            ok, out = self._ts(['up'], timeout=60)
+            self.log(('✅ Tailscale 已连接' if ok else '❌ Tailscale 连接失败（可能需登录）')
+                     + ('\n' + out if out else ''))
+            self._refresh_env()
+        threading.Thread(target=work, daemon=True).start()
+
+    def tailscale_onekey(self):
+        """一键 Tailscale：检查连接 -> up -> serve 状态 -> 走广域网复原流程"""
+        def work():
+            self.log('==== Tailscale 一键配置 ====')
+            ok, out = self._ts(['status'])
+            if not ok:
+                self.log('Tailscale 未连接，执行 tailscale up…')
+                ok2, out2 = self._ts(['up'], timeout=60)
+                if not ok2:
+                    self.log('❌ tailscale up 失败（可能需要登录 tailnet）：\n' + out2)
+                    return
+                self.log('✅ Tailscale 已连接')
+            else:
+                self.log('✅ Tailscale 已在线')
+            sok, sout = self._ts(['serve', 'status'])
+            self.log('当前 Serve 规则：\n' + (sout or '(空)'))
+            self.log('→ 执行广域网一键复原…')
+            self.wan_restore()
+        threading.Thread(target=work, daemon=True).start()
 
     def _install_node(self):
         self.log('通过 winget 安装 Node.js LTS（如弹权限窗口请允许）…')
@@ -944,15 +1258,13 @@ class App:
             self.log('清理进程失败: ' + str(e))
 
     def clean_restart_gw(self):
-        """全清重启：停计划任务 -> 强杀残留进程 -> 干净启动，根治双实例问题"""
+        """全清重启：停网关 -> 强杀残留进程 -> 直接 node 干净启动，根治双实例/重启循环"""
         self.log('🔧 全清重启网关…')
-        code, out = run_cli(['gateway', 'stop'], timeout=30)
-        self.log((out or 'OK').strip()[:200])
+        self.stop_gw()
         time.sleep(2)
         self.kill_all_gw()
         time.sleep(2)
-        code, out = run_cli(['gateway', 'start'])
-        self.log((out or 'OK').strip()[:300])
+        self.start_gw()
         time.sleep(3)
         if gw_running():
             self.log('✅ 网关已干净重启，单实例运行')
@@ -1153,23 +1465,36 @@ class App:
 
     # ---------- 自定义模型 ----------
     def _refresh_gen_models(self, initial=False):
-        """从 ComfyUI 拉取生图模型列表（checkpoints + diffusion_models/unet），载入已保存默认"""
-        try:
-            import urllib.request, json as _json
-            a = _json.load(urllib.request.urlopen(
-                'http://127.0.0.1:8188/object_info/CheckpointLoaderSimple', timeout=8))
-            b = _json.load(urllib.request.urlopen(
-                'http://127.0.0.1:8188/object_info/UNETLoader', timeout=8))
-            items = a['CheckpointLoaderSimple']['input']['required']['ckpt_name'][0] + \
-                    b['UNETLoader']['input']['required']['unet_name'][0]
-            seen, self._gen_ckpts = set(), []
-            for it in items:
-                k = it.replace('\\', '/')
-                if k not in seen:
-                    seen.add(k)
-                    self._gen_ckpts.append(it)
-        except Exception:
-            self._gen_ckpts = [
+        """从 ComfyUI 拉取生图模型列表（checkpoints + diffusion_models/unet）。
+        网络请求放后台线程：ComfyUI 离线时不再卡住启动（原来主线程等 8s×2）。"""
+        def fetch():
+            ckpts = None
+            try:
+                import urllib.request, json as _json
+                a = _json.load(urllib.request.urlopen(
+                    f'http://127.0.0.1:{COMFY_PORT}/object_info/CheckpointLoaderSimple', timeout=8))
+                b = _json.load(urllib.request.urlopen(
+                    f'http://127.0.0.1:{COMFY_PORT}/object_info/UNETLoader', timeout=8))
+                items = a['CheckpointLoaderSimple']['input']['required']['ckpt_name'][0] + \
+                        b['UNETLoader']['input']['required']['unet_name'][0]
+                seen, ckpts = set(), []
+                for it in items:
+                    k = it.replace('\\', '/')
+                    if k not in seen:
+                        seen.add(k)
+                        ckpts.append(it)
+            except Exception:
+                ckpts = None
+            try:
+                self.root.after(0, lambda: self._apply_gen_models(ckpts, initial))
+            except Exception:
+                pass
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _apply_gen_models(self, ckpts, initial):
+        """把拉取/兜底结果落到 UI（主线程）"""
+        if ckpts is None:
+            ckpts = [
                 'Z-Image-Base-8steps-White_Marble-AIO_v2-fp8.safetensors',
                 'diffusion_models\\Krea2\\Krea2-Moody-Mix-premium_int4_convrot.safetensors',
                 'diffusion_models\\Krea2\\Krea2-1125Krea2AsianUtopian_v2_int4_convrot.safetensors',
@@ -1177,7 +1502,8 @@ class App:
                 'diffusion_models\\z_image\\ZIT-moodyProMix_zitV13_bf16.safetensors',
                 'XL-写实\\IL-perfectionRealisticILXL_33.safetensors',
             ]
-        self.gen_model_combo['values'] = self._gen_ckpts
+        self._gen_ckpts = ckpts
+        self.gen_model_combo['values'] = ckpts
         # 读已保存的默认（gen_model.txt 记录 basename）
         saved = ''
         try:
@@ -1187,24 +1513,24 @@ class App:
             pass
         cur = ''
         if saved:
-            for c in self._gen_ckpts:
+            for c in ckpts:
                 if c.replace('\\', '/').rsplit('/', 1)[-1].lower() == saved.lower():
                     cur = c
                     break
             if not cur:
-                for c in self._gen_ckpts:
+                for c in ckpts:
                     if saved.lower() in c.lower():
                         cur = c
                         break
         if not cur:
-            for c in self._gen_ckpts:
+            for c in ckpts:
                 if 'Z-Image' in c:
                     cur = c
                     break
         if cur:
             self.gen_model_var.set(cur)
         if not initial:
-            self.log('生图模型列表已刷新（%d 个）' % len(self._gen_ckpts))
+            self.log('生图模型列表已刷新（%d 个）' % len(ckpts))
 
     def _save_gen_model(self, _evt=None):
         """选择即保存：把选中的模型写进 gen_model.txt，MCP 生图时读取"""
@@ -1223,7 +1549,7 @@ class App:
     # ---------- 生图默认 LoRA ----------
     def _refresh_loras(self, initial=False):
         """从 ComfyUI loras 目录拉取 LoRA（krea2 / z-image 两个下拉），载入已保存默认"""
-        root = r'L:\OpenClaw\ComfyUI\ComfyUI\models\loras'
+        root = os.path.join(COMFY_DIR, 'models', 'loras')
         loras = []
         if os.path.isdir(root):
             for dp, dns, fns in os.walk(root):
@@ -1269,16 +1595,57 @@ class App:
         except Exception as e:
             self.log('保存LoRA失败：' + str(e))
 
+    # ---------- 生图工作流选择 ----------
+    def _refresh_gen_workflows(self, initial=False):
+        """递归列出 workflows 目录的 .json 模板（含子目录、不含 .ui.json），载入已保存默认"""
+        try:
+            files = []
+            for dp, dns, fns in os.walk(WF_DIR):
+                for fn in sorted(fns):
+                    if fn.endswith('.json') and not fn.endswith('.ui.json'):
+                        rel = os.path.relpath(os.path.join(dp, fn), WF_DIR).replace('\\', '/')
+                        files.append(rel)
+            files.sort()
+        except Exception:
+            files = []
+        self.gen_wf_combo['values'] = files
+        saved = ''
+        fp = os.path.join(_BASE_DIR, 'gen_workflow.txt')
+        try:
+            with io.open(fp, encoding='utf-8') as f:
+                saved = f.read().strip()
+        except Exception:
+            pass
+        if saved in files:
+            self.gen_wf_var.set(saved)
+        elif initial and files:
+            self.gen_wf_var.set('default.json' if 'default.json' in files else files[0])
+        if initial:
+            self.log('生图工作流已载入（%d 个模板）' % len(files))
+
+    def _save_gen_workflow(self, event=None):
+        """选择即保存：写 gen_workflow.txt，MCP 生图时读取"""
+        v = self.gen_wf_var.get().strip()
+        if not v:
+            return
+        fp = os.path.join(_BASE_DIR, 'gen_workflow.txt')
+        try:
+            with io.open(fp, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(v + '\n')
+            self.log('生图工作流已设为：' + v)
+        except Exception as e:
+            self.log('保存生图工作流失败：' + str(e))
+
     def open_upload_dir(self):
         """打开上传文件夹（微信/网页收到的图）"""
-        d = r'L:\OpenClaw\OpenClawData\media\inbound'
+        d = os.path.join(os.path.dirname(CONFIG_PATH), 'media', 'inbound')
         os.makedirs(d, exist_ok=True)
         os.startfile(d)
         self.log('已打开上传文件夹：' + d)
 
     def open_output_dir(self):
-        """打开生图输出文件夹"""
-        d = r'L:\OpenClaw\ComfyUI\ComfyUI\output'
+        """打开生图输出文件夹（跟随 ComfyUI 根目录配置）"""
+        d = os.path.join(COMFY_DIR, 'output')
         os.makedirs(d, exist_ok=True)
         os.startfile(d)
         self.log('已打开生成文件夹：' + d)
@@ -1332,7 +1699,7 @@ class App:
 
     # ---------- 一键恢复 ----------
     def _restore_all(self):
-        """一键恢复：检查并拉起缺失的服务（llama/ComfyUI/网关）"""
+        """一键恢复：修复配置 -> 拉起缺失的服务（llama/ComfyUI/网关）"""
         self.log('=== 一键恢复 ===')
         def work():
             try:
@@ -1341,6 +1708,8 @@ class App:
                 self.log('环境变量 OPENCLAW_STATE_DIR 已确认')
             except Exception as e:
                 self.log('环境变量设置失败: ' + str(e))
+            # 0. 修复配置（MCP / paths.json / tools.deny）
+            self._fix_configs()
             # 1. llama
             if llama_running():
                 self.log('模型服务已在运行')
@@ -1359,7 +1728,7 @@ class App:
                     self.restart_comfy()
                 except Exception as e:
                     self.log('ComfyUI 启动异常: ' + str(e))
-            # 3. 网关（gateway.cmd 直启，绕开 non-default state dir 限制）
+            # 3. 网关（直接 node 启动，绕开 gateway.cmd --task-supervisor 重启循环）
             if gw_running():
                 self.log('网关已在运行')
             else:
@@ -1370,10 +1739,11 @@ class App:
                     env = dict(os.environ)
                     env['OPENCLAW_STATE_DIR'] = r'L:\OpenClaw\OpenClawData'
                     env['PATH'] = os.path.dirname(NODE_EXE) + ';' + env.get('PATH', '')
-                    subprocess.Popen(['cmd', '/c', r'L:\OpenClaw\OpenClawData\gateway.cmd'],
+                    subprocess.Popen([NODE_EXE, '--max-old-space-size=8192', OPENCLAW_MJS,
+                                      'gateway', '--port', '18789'],
                                      stdout=gw_logf, stderr=subprocess.STDOUT,
                                      creationflags=subprocess.CREATE_NO_WINDOW, env=env)
-                    self.log('已后台启动网关（gateway.cmd）...')
+                    self.log('已后台启动网关（直接 node）...')
                 except Exception as e:
                     self.log('网关启动异常: ' + str(e))
             time.sleep(2)
@@ -1383,6 +1753,85 @@ class App:
                 pass
             self.log('=== 一键恢复完成 ===')
         threading.Thread(target=work, daemon=True).start()
+
+    def _fix_configs(self):
+        """修复 openclaw.json（MCP 配置 + tools.deny）与 paths.json（comfy_root 等路径）。
+        幂等：配置正确时不改动。"""
+        # ---- paths.json ----
+        try:
+            pcfg = _load_paths()
+            changed = False
+            expected = {
+                'llama_dir': r'L:\OpenClaw\llama',
+                'comfy_root': r'L:\OpenClaw\ComfyUI',
+                'openclaw_data': r'L:\OpenClaw\OpenClawData',
+                'openclaw_npm': r'L:\OpenClaw\npm',
+                'node_exe': r'C:\Program Files\nodejs\node.exe',
+            }
+            # 只补缺失键，不覆盖用户已保存的自定义路径（如 comfy_root 迁到 L:\ComfyUI）
+            for k, v in expected.items():
+                if not pcfg.get(k):
+                    pcfg[k] = v
+                    changed = True
+            if changed:
+                _save_paths(pcfg)
+                _apply_paths(pcfg)
+                self.log('paths.json 已补全缺失键（已有自定义路径保持不变）')
+        except Exception as e:
+            self.log('paths.json 修复失败: ' + str(e))
+        # ---- openclaw.json ----
+        try:
+            if not os.path.isfile(CONFIG_PATH):
+                self.log('openclaw.json 不存在: ' + str(CONFIG_PATH))
+            else:
+                cfg = json.loads(io.open(CONFIG_PATH, encoding='utf-8').read() or '{}')
+                changed = False
+                mcp = cfg.setdefault('mcp', {}).setdefault('servers', {}).setdefault('comfyui', {})
+                pcfg2 = _load_paths()
+                ocd = pcfg2.get('openclaw_data') or r'L:\OpenClaw\OpenClawData'
+                py_exe = os.path.join(os.path.dirname(ocd), 'python', 'python.exe')
+                mcp_script = os.path.join(ocd, 'console', 'comfyui_mcp_server.py')
+                mcp_cwd = os.path.join(ocd, 'console')
+                if mcp.get('command') != py_exe:
+                    mcp['command'] = py_exe
+                    changed = True
+                if mcp.get('args') != [mcp_script]:
+                    mcp['args'] = [mcp_script]
+                    changed = True
+                if mcp.get('enabled') is not True:
+                    mcp['enabled'] = True
+                    changed = True
+                if mcp.get('transport') != 'stdio':
+                    mcp['transport'] = 'stdio'
+                    changed = True
+                if mcp.get('cwd') != mcp_cwd:
+                    mcp['cwd'] = mcp_cwd
+                    changed = True
+                if mcp.get('requestTimeoutMs') != 300000:
+                    mcp['requestTimeoutMs'] = 300000
+                    changed = True
+                tools = cfg.setdefault('tools', {})
+                deny = tools.setdefault('deny', [])
+                if 'image_generate' not in deny:
+                    deny.append('image_generate')
+                    changed = True
+                if tools.get('profile') != 'coding':
+                    tools['profile'] = 'coding'
+                    changed = True
+                if changed:
+                    bak = CONFIG_PATH + '.bak_restore_' + time.strftime('%Y%m%d%H%M%S')
+                    try:
+                        import shutil
+                        shutil.copy2(CONFIG_PATH, bak)
+                    except Exception:
+                        pass
+                    with io.open(CONFIG_PATH, 'w', encoding='utf-8', newline='\n') as f:
+                        json.dump(cfg, f, ensure_ascii=False, indent=2)
+                    self.log('openclaw.json 已修复（MCP 路径/enabled/transport + tools.deny）')
+                else:
+                    self.log('openclaw.json 配置正确')
+        except Exception as e:
+            self.log('openclaw.json 修复失败: ' + str(e))
 
     def manage_model_dirs(self):
         """管理额外模型扫描目录 + 自定义单文件（合并后的入口）"""
@@ -1580,7 +2029,11 @@ class App:
             subprocess.run(['taskkill', '/F', '/IM', 'llama-server.exe'],
                            capture_output=True, timeout=30,
                            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-            time.sleep(1)
+            # 等端口真正释放，避免残留实例占端口导致误判"已在运行"
+            for _ in range(10):
+                if get_llm_pid() is None:
+                    break
+                time.sleep(0.5)
         except Exception:
             pass
         if llama_running():
@@ -1731,13 +2184,22 @@ class App:
             self.log(f'ComfyUI 未运行（{COMFY_PORT}），无法执行 {node}')
             return
         try:
-            workflow = {node: {'class_type': node, 'inputs': {
-                'offload_model': True, 'offload_cache': True}}}
+            if node == 'RAMCleanup':
+                inputs = {'clean_file_cache': True, 'clean_processes': True,
+                          'clean_dlls': True, 'retry_times': 3}
+            else:  # VRAMCleanup
+                inputs = {'offload_model': True, 'offload_cache': True}
+            workflow = {node: {'class_type': node, 'inputs': inputs}}
+            # 清理显存时链式挂上 RAMCleanup，释放更彻底（模型/缓存一次卸干净）
+            if node == 'VRAMCleanup':
+                workflow['RAMCleanup'] = {'class_type': 'RAMCleanup', 'inputs': {
+                    'clean_file_cache': True, 'clean_processes': True,
+                    'clean_dlls': True, 'retry_times': 3}}
             req = urllib.request.Request(
                 f'http://127.0.0.1:{COMFY_PORT}/prompt',
                 data=json.dumps({'prompt': workflow}).encode('utf-8'),
                 headers={'Content-Type': 'application/json'})
-            r = urllib.request.urlopen(req, timeout=20)
+            r = urllib.request.urlopen(req, timeout=30)
             body = r.read().decode('utf-8', 'replace')
             self.log(f'{node} 提交完成: {body[:100]}')
         except Exception as e:
@@ -1793,17 +2255,93 @@ class App:
         except Exception as e:
             self.log('浏览路径失败: ' + str(e))
 
+    def _apply_patches_after_path_change(self):
+        """路径变更后自动重打生图链路补丁（媒体白名单跟随新 comfy_root），不自动重启网关。
+        补丁脚本 apply_openclaw_patches.py 需与 paths.json 同目录（L:\\OpenClaw\\OpenClawData\\console）。"""
+        script = os.path.join(_BASE_DIR, 'apply_openclaw_patches.py')
+        if not os.path.isfile(script):
+            self.log('未找到 apply_openclaw_patches.py（应与本程序同目录），跳过补丁重打')
+            return
+        py = r'L:\OpenClaw\python\python.exe'
+        if not os.path.isfile(py):
+            py = sys.executable
+        try:
+            subprocess.Popen([py, script, '--no-restart'],
+                             creationflags=0x08000000,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.log('✅ 已自动重打生图链路补丁（白名单已跟随新 ComfyUI 目录；重启网关后生效）')
+        except Exception as e:
+            self.log('自动补丁重打失败: ' + str(e))
+
     def save_paths_ui(self):
         try:
             p = dict(_DEFAULT_PATHS)
             p.update({k: v.get().strip().rstrip('\\/') for k, v in self.path_vars.items()})
             if _save_paths(p):
-                self.log('✅ 路径已保存到 paths.json（重启控制台后生效）')
-                messagebox.showinfo('路径设置', '路径已保存，重启控制台后生效。\n重装系统后改完路径，点「一键复原广域网」即可复原。')
+                _apply_paths(p)  # 即时更新内存路径，无需重启控制台
+                self._apply_patches_after_path_change()
+                self.log('✅ 路径已保存并即时生效（重启对应服务后使用新路径）')
+                messagebox.showinfo('路径设置', '路径已保存并即时生效。\n已自动重打生图链路补丁（媒体白名单跟随新 ComfyUI 目录）。\n重启对应服务（模型/网关/生图）即使用新路径。\n重装系统后改完路径，点「一键复原广域网」即可复原。')
             else:
                 messagebox.showerror('路径设置', '保存失败，请检查目录权限')
         except Exception as e:
             self.log('保存路径失败: ' + str(e))
+
+    # ---------- 生图方式（固定 ComfyUI / 自动选择） ----------
+    def _gen_mode_current(self):
+        """读取当前生图方式：tools.deny 含 image_generate 则固定 ComfyUI"""
+        try:
+            if not os.path.isfile(CONFIG_PATH):
+                return 'comfy'
+            cfg = json.loads(io.open(CONFIG_PATH, encoding='utf-8').read() or '{}')
+            deny = (cfg.get('tools') or {}).get('deny') or []
+            return 'comfy' if 'image_generate' in deny else 'auto'
+        except Exception:
+            return 'comfy'
+
+    def save_gen_mode(self):
+        """保存生图方式：固定 ComfyUI 写 tools.deny + AGENTS.md 指令；自动选择则移除"""
+        try:
+            mode = self.gen_mode_var.get()
+            cfg = {}
+            if os.path.isfile(CONFIG_PATH):
+                try:
+                    cfg = json.loads(io.open(CONFIG_PATH, encoding='utf-8').read() or '{}')
+                except Exception:
+                    cfg = {}
+            tools = cfg.setdefault('tools', {})
+            deny = [d for d in (tools.get('deny') or []) if d != 'image_generate']
+            if mode == 'comfy':
+                deny.append('image_generate')
+            if deny:
+                tools['deny'] = deny
+            else:
+                tools.pop('deny', None)
+            with io.open(CONFIG_PATH, 'w', encoding='utf-8', newline='\n') as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            # AGENTS.md 写/清生图指令（双保险，防模型自作主张用内置工具）
+            ws = ((cfg.get('agents') or {}).get('defaults') or {}).get('workspace') or \
+                 os.path.join(os.path.expanduser('~'), '.openclaw', 'workspace')
+            agents_md = os.path.join(ws, 'AGENTS.md')
+            import re as _re
+            line_on = ('## 生图方式\n'
+                       '- 生图一律使用 `comfyui__generate_image` 工具（ComfyUI MCP），不要使用内置 `image_generate` 工具。\n'
+                       '- 不要向用户弹出“选择图生图工具”，直接用本地 ComfyUI 生图。\n')
+            block_on = '<!-- gen-mode:comfy -->\n' + line_on + '<!-- /gen-mode:comfy -->\n'
+            txt = ''
+            if os.path.isfile(agents_md):
+                txt = io.open(agents_md, encoding='utf-8').read()
+            txt = _re.sub(r'<!-- gen-mode:comfy -->.*?<!-- /gen-mode:comfy -->\n?', '', txt, flags=_re.S)
+            if mode == 'comfy':
+                txt = txt.rstrip() + '\n\n' + block_on
+            with io.open(agents_md, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(txt)
+            label = '固定 ComfyUI' if mode == 'comfy' else '自动选择'
+            self.log('✅ 生图方式已设为：' + label + '（重启网关生效）')
+            messagebox.showinfo('生图方式', '已保存，重启网关后生效。\n\n固定 ComfyUI：微信/各通道生图直接走本地 ComfyUI，不再弹工具选择框。')
+        except Exception as e:
+            self.log('保存生图方式失败: ' + str(e))
+            messagebox.showerror('生图方式', '保存失败：' + str(e))
 
     def _wan_hostname(self):
         exe = TAILSCALE_EXE
@@ -1835,7 +2373,7 @@ class App:
         """打开 ComfyUI 远程地址（8443 通道）"""
         host = self._wan_hostname()
         if host:
-            webbrowser.open(host.rstrip('/') + ':8443/comfy')
+            webbrowser.open(host.rstrip('/') + ':8443')
 
     def wan_restore(self):
         """一键复原广域网（终态）：
@@ -1905,13 +2443,13 @@ class App:
             time.sleep(2)
             self.start_gw()
             time.sleep(7)
-            # 5) ComfyUI 8443 通道（443 被 OpenClaw claim，ComfyUI 走独立端口）
-            subprocess.run([exe, 'serve', '--bg', '--https=8443', '--set-path=/comfy',
-                            'http://127.0.0.1:8188'], capture_output=True, text=True, timeout=30)
+            # 5) ComfyUI 8443 通道（443 被 OpenClaw claim，ComfyUI 走独立端口；根路径全代理，前端相对路径/ws/api 全覆盖）
+            subprocess.run([exe, 'serve', '--bg', '--https=8443',
+                            f'http://127.0.0.1:{COMFY_PORT}'], capture_output=True, text=True, timeout=30)
             host = self._wan_hostname()
             if host:
-                self.wan_info.set('已启用 · ' + host + ' · ComfyUI: ' + host + ':8443/comfy')
-                self.log('✅ 广域网已复原：' + host + ' · ComfyUI: ' + host + ':8443/comfy')
+                self.wan_info.set('已启用 · ' + host + ' · ComfyUI: ' + host + ':8443')
+                self.log('✅ 广域网已复原：' + host + ' · ComfyUI: ' + host + ':8443')
             else:
                 self.wan_info.set('配置已写入（Tailscale 未登录，登录后重试）')
                 self.log('⚠ 配置已写入，Tailscale 未登录，请登录后重试')
@@ -1919,19 +2457,19 @@ class App:
 
     def start_gw(self):
         self.log('启动网关...')
-        # CLI 服务管理命令（gateway start）在非默认 state dir 下会被拒绝，
-        # 改用 gateway.cmd 直启（与「一键恢复」同路径，绕开该限制）
+        # 直接 node 启动，绕开 gateway.cmd 的 --task-supervisor（会导致 supervisor 反复重启网关子进程）
         try:
             gw_logf = io.open(os.path.join(LOG_DIR, 'gateway.log'), 'a',
                               encoding='utf-8', errors='replace', buffering=1)
             env = dict(os.environ)
-            env['OPENCLAW_STATE_DIR'] = r'L:\OpenClaw\OpenClawData'
+            env['OPENCLAW_STATE_DIR'] = os.path.dirname(CONFIG_PATH)
             ts_dir = os.path.dirname(TAILSCALE_EXE) if os.path.isfile(TAILSCALE_EXE) else ''
             env['PATH'] = (ts_dir + ';' if ts_dir else '') + os.path.dirname(NODE_EXE) + ';' + env.get('PATH', '')
-            subprocess.Popen(['cmd', '/c', r'L:\OpenClaw\OpenClawData\gateway.cmd'],
+            subprocess.Popen([NODE_EXE, '--max-old-space-size=8192', OPENCLAW_MJS,
+                              'gateway', '--port', str(PORT_GW)],
                              stdout=gw_logf, stderr=subprocess.STDOUT,
                              creationflags=subprocess.CREATE_NO_WINDOW, env=env)
-            self.log('已后台启动网关（gateway.cmd）...')
+            self.log('已后台启动网关（直接 node）...')
         except Exception as e:
             self.log('网关启动异常: ' + str(e))
             return
@@ -2000,7 +2538,7 @@ class App:
             extra += ' --reasoning off --cache-type-k q8_0 --cache-type-v q8_0'
         if mmproj:
             ctx = '65536'
-            extra = f' --mmproj """{mmproj}"""'
+            extra += f' --mmproj """{mmproj}"""'
         if ngl != '999':
             extra += ' --fit off'
         vbs = (
@@ -2040,13 +2578,16 @@ class App:
 
     def _enable_gw_autostart(self):
         try:
-            if self._gw_autostart_exists():
-                self.log('网关开机自启已存在')
-                return
+            # 先删旧任务再建（旧任务指向 gateway.vbs→gateway.cmd 含 --task-supervisor，会导致重启循环）
+            subprocess.run(['schtasks', '/Delete', '/TN', self.GW_TASK, '/F'],
+                           capture_output=True, text=True, errors='replace', timeout=30)
+            node = NODE_EXE
+            mjs = OPENCLAW_MJS
+            tr = ('"' + node + '" --max-old-space-size=8192 "' + mjs +
+                  '" gateway --port ' + str(PORT_GW))
             r = subprocess.run(
                 ['schtasks', '/Create', '/TN', self.GW_TASK,
-                 '/TR', r'L:\OpenClaw\OpenClawData\gateway.vbs',
-                 '/SC', 'ONLOGON', '/F'],
+                 '/TR', tr, '/SC', 'ONLOGON', '/F'],
                 capture_output=True, text=True, errors='replace', timeout=30)
             out = (r.stdout or r.stderr or '').strip()
             if 'SUCCESS' in out:
@@ -2071,7 +2612,7 @@ class App:
     def _enable_comfy_autostart(self):
         try:
             vbs = ('Set ws = CreateObject("Wscript.Shell")\n'
-                   'ws.Run "wscript \"L:\\OpenClaw\\ComfyUI\\comfy_start.vbs\"", 0, False\n')
+                   'ws.Run "wscript \"%s\\comfy_start.vbs\"", 0, False\n' % COMFY_ROOT)
             with open(COMFY_AUTOSTART_VBS, 'w', encoding='utf-8') as f:
                 f.write(vbs)
             self.log('已启用 ComfyUI 开机自启')
@@ -2155,6 +2696,20 @@ class App:
         self._polling = False
         self.root.destroy()
 
+def _ensure_single_instance():
+    """Windows 互斥量单实例锁：已有实例在跑则返回 False（防止开一个程序弹两个窗口）"""
+    global _SINGLE_MUTEX
+    try:
+        import ctypes
+        _SINGLE_MUTEX = ctypes.windll.kernel32.CreateMutexW(None, False,
+                                                            'OpenClawConsole_SingleInstance')
+        # ERROR_ALREADY_EXISTS = 183
+        return ctypes.windll.kernel32.GetLastError() != 183
+    except Exception:
+        return True
+
+_SINGLE_MUTEX = None
+
 def main():
     # DPI 感知：按物理像素布局，避免系统缩放（125%/150%）把窗口放大到巨大
     try:
@@ -2165,6 +2720,12 @@ def main():
             ctypes.windll.user32.SetProcessDPIAware()
     except Exception:
         pass
+    if not _ensure_single_instance():
+        try:
+            messagebox.showwarning('OpenClaw 控制台', '控制台已在运行（单实例）。\n请到已打开的窗口操作。')
+        except Exception:
+            pass
+        return
     root = tk.Tk()
     app = App(root)
     root.protocol('WM_DELETE_WINDOW', app.on_close)

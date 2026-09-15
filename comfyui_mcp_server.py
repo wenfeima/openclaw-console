@@ -10,30 +10,61 @@ import re
 import subprocess
 import sys
 import time
+import io
 import urllib.request
 
-COMFY_PORT = 8189
+COMFY_PORT = 8188
 LLM_PORT = 8080
-COMFY_PY = r'L:\OpenClaw\ComfyUI\python_embeded\python.exe'          # ComfyUI 自带 python 环境
-COMFY_MAIN = r'L:\OpenClaw\ComfyUI\ComfyUI\main.py'                   # ComfyUI 源码入口
-COMFY_CWD = r'L:\OpenClaw\ComfyUI\ComfyUI'
+# 路径跟随 paths.json（与 openclaw_console.py 同目录；设置页改路径后重启网关生效）
+def _load_paths():
+    p = {}
+    try:
+        base = os.path.dirname(os.path.abspath(__file__))
+        with io.open(os.path.join(base, 'paths.json'), encoding='utf-8') as f:
+            p = json.load(f)
+    except Exception:
+        pass
+    return p
+_PATHS = _load_paths()
+COMFY_ROOT = _PATHS.get('comfy_root', r'L:\OpenClaw\ComfyUI')
+LLAMA_DIR  = _PATHS.get('llama_dir', r'L:\OpenClaw\llama')
+COMFY_PY = os.path.join(COMFY_ROOT, 'python_embeded', 'python.exe')   # ComfyUI 自带 python 环境
+COMFY_MAIN = os.path.join(COMFY_ROOT, 'ComfyUI', 'main.py')            # ComfyUI 源码入口
+COMFY_CWD = os.path.join(COMFY_ROOT, 'ComfyUI')
 CKPT_DIR = os.path.join(COMFY_CWD, 'models', 'checkpoints')
 OUT_DIR = os.path.join(COMFY_CWD, 'output')
 OUT_URL = f'http://127.0.0.1:{COMFY_PORT}'
+WF_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'workflows')
+
+
+def _refresh_paths():
+    """每次生图/列模型前重新读取 paths.json，跟随用户在控制台设置页的修改，
+    避免 MCP 进程常驻导致改路径后仍用旧目录（旧目录/新目录模型列表不一致的根因）。"""
+    global _PATHS, COMFY_ROOT, LLAMA_DIR, COMFY_PY, COMFY_MAIN, COMFY_CWD, CKPT_DIR, OUT_DIR, OUT_URL, LLM_EXE
+    _PATHS = _load_paths()
+    COMFY_ROOT = _PATHS.get('comfy_root') or r'L:\OpenClaw\ComfyUI'
+    LLAMA_DIR = _PATHS.get('llama_dir') or r'L:\OpenClaw\llama'
+    COMFY_PY = os.path.join(COMFY_ROOT, 'python_embeded', 'python.exe')
+    COMFY_MAIN = os.path.join(COMFY_ROOT, 'ComfyUI', 'main.py')
+    COMFY_CWD = os.path.join(COMFY_ROOT, 'ComfyUI')
+    CKPT_DIR = os.path.join(COMFY_CWD, 'models', 'checkpoints')
+    OUT_DIR = os.path.join(COMFY_CWD, 'output')
+    OUT_URL = f'http://127.0.0.1:{COMFY_PORT}'
+    LLM_EXE = os.path.join(LLAMA_DIR, 'llama-server.exe')
 # 默认用完整 SDXL 写实模型（FP8/新架构模型无内嵌 CLIP，标准工作流跑不了）
 DEFAULT_CKPT = os.path.join('XL-写实', 'IL-perfectionRealisticILXL_33.safetensors')
 
 CREATE_NO_WINDOW = 0x08000000
 
 # llama 默认启动配置（stop_llm 抓取命令行失败时用此兜底恢复）
-LLM_EXE = r'L:\OpenClaw\llama\llama-server.exe'
+LLM_EXE = os.path.join(LLAMA_DIR, 'llama-server.exe')
 LLM_DEFAULT_ARGV = [
     LLM_EXE,
-    '-m', r'L:\OpenClaw\llama\models\gemma-4-12b-it-Q4_0.gguf',
+    '-m', os.path.join(LLAMA_DIR, 'models', 'gemma-4-12b-it-Q4_0.gguf'),
     '-ngl', '999', '-c', '65536',
     '--host', '127.0.0.1', '--port', '8080',
     '--alias', 'local-model',
-    '--mmproj', r'L:\OpenClaw\llama\models\mmproj-gemma-4-12B-it-Q8_0.gguf',
+    '--mmproj', os.path.join(LLAMA_DIR, 'models', 'mmproj-gemma-4-12B-it-Q8_0.gguf'),
     '--reasoning', 'off',
     '--cache-type-k', 'q8_0', '--cache-type-v', 'q8_0',
 ]
@@ -167,6 +198,7 @@ def restore_llm(argv):
 
 def ensure_comfy():
     """确保 ComfyUI 在运行，不在则拉起"""
+    _refresh_paths()
     if _http_ok(f'http://127.0.0.1:{COMFY_PORT}/system_stats'):
         return True
     if not os.path.isfile(COMFY_MAIN):
@@ -186,6 +218,7 @@ def ensure_comfy():
 
 def list_ckpts():
     """列出可用的 checkpoint（完整 SD 系优先，含子目录相对路径）"""
+    _refresh_paths()
     out = []
     if not os.path.isdir(CKPT_DIR):
         return out
@@ -199,6 +232,7 @@ def list_ckpts():
 
 def list_unets():
     """列出 diffusion_models 与 unet 目录的 UNET 模型（Z-Image/Krea2 等新架构）"""
+    _refresh_paths()
     out = []
     for base in ('diffusion_models', 'unet'):
         d = os.path.join(COMFY_CWD, 'models', base)
@@ -394,6 +428,115 @@ def build_workflow(ckpt, positive, negative, width, height, steps, seed, lora_na
     return wf
 
 
+# ============ 工作流文件模板（编辑器可改）============
+def _read_gen_workflow():
+    """读取控制台保存的生图工作流偏好（gen_workflow.txt），无则 None"""
+    fp = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gen_workflow.txt')
+    try:
+        with io.open(fp, encoding='utf-8') as f:
+            v = f.read().strip()
+            return v if v else None
+    except Exception:
+        return None
+
+
+def _load_wf_template(ckpt, wf_name=None):
+    """按模型分支加载 workflows/{krea2,zimage,default}.json（编辑器保存的模板）。
+    指定 wf_name 时优先加载该文件（含自建工作流）。
+    无模板文件时返回 None，回退 build_workflow 旧逻辑。"""
+    if wf_name:
+        base = wf_name if wf_name.endswith('.json') else wf_name + '.json'
+        fp = os.path.abspath(os.path.join(WF_DIR, base))
+        wf_abs = os.path.abspath(WF_DIR)
+        if os.path.commonpath([wf_abs, fp]) == wf_abs and os.path.isfile(fp):
+            try:
+                with io.open(fp, encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception:
+                return None
+    low = ckpt.lower()
+    key = 'default'
+    if 'krea' in low:
+        key = 'krea2'
+    elif 'z-image' in low or 'zit' in low:
+        key = 'zimage'
+    fp = os.path.join(WF_DIR, key + '.json')
+    if not os.path.isfile(fp):
+        return None
+    try:
+        with io.open(fp, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _fill_template(tpl, **vals):
+    """递归替换 {{key}} 占位符；整值占位（{{seed}}）保留原类型（int/float），
+    字符串内嵌占位（prefix_{{seed}}）转字符串。"""
+    def fill(v):
+        if isinstance(v, dict):
+            return {k: fill(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [fill(x) for x in v]
+        if isinstance(v, str):
+            m = re.fullmatch(r'\{\{\s*(\w+)\s*\}\}', v.strip())
+            if m and m.group(1) in vals:
+                return vals[m.group(1)]
+            def rep(mo):
+                k = mo.group(1)
+                return str(vals[k]) if k in vals else mo.group(0)
+            return re.sub(r'\{\{\s*(\w+)\s*\}\}', rep, v)
+        return v
+    return fill(tpl)
+
+
+def _build_wf_from_template(ckpt, positive, negative, width, height, steps, seed,
+                            lora_name='', lora_strength=0.8, workflow=None):
+    """优先用编辑器保存的工作流模板（可指定 workflow 文件名）；无模板回退 build_workflow（含旧 LoRA 注入）。"""
+    tpl = _load_wf_template(ckpt, workflow)
+    if tpl is None:
+        return build_workflow(ckpt, positive, negative, width, height, steps, seed,
+                              lora_name=lora_name, lora_strength=lora_strength)
+    is_krea = 'krea' in ckpt.lower()
+    is_zimage = 'z-image' in ckpt.lower() or 'zit' in ckpt.lower()
+    unet_v = _unet_rel(ckpt)
+    if is_krea:
+        unet_b = unet_v.replace('\\', '/').rsplit('/', 1)[-1]
+        if not any(u.replace('\\', '/').rsplit('/', 1)[-1] == unet_b for u in list_unets()):
+            unet_v = 'krea2\\Krea2-Moody-Mix-premium_int4_convrot.safetensors'
+        if 'bf16' in ckpt.lower() or 'bf16' in unet_v.lower():
+            unet_v = 'krea2\\Krea2-Moody-Mix-premium_int4_convrot.safetensors'
+    elif is_zimage:
+        unet_v = 'z_image\\z_image_turbo_int8_convrot.safetensors'
+    wf = _fill_template(tpl,
+                        positive=positive, negative=negative,
+                        width=int(width), height=int(height),
+                        width2=int(width) * 2, height2=int(height) * 2,
+                        steps=int(steps), seed=int(seed), ckpt=ckpt,
+                        unet=unet_v, lora_name=lora_name, lora_strength=lora_strength)
+    # 模板若含 LoraLoader 且 lora_name 为空：删节点并修复引用（KSampler/CLIP 回退模型源）
+    if not lora_name:
+        lora_ids = [nid for nid, nd in wf.items() if nd.get('class_type') == 'LoraLoader']
+        if lora_ids:
+            src_id = None
+            for nid, nd in wf.items():
+                if nd.get('class_type') in ('UNETLoader', 'CheckpointLoaderSimple'):
+                    src_id = nid
+                    break
+            if src_id is not None:
+                clip_src = [src_id, 1] if wf[src_id]['class_type'] == 'CheckpointLoaderSimple' else [src_id, 0]
+                for nid in lora_ids:
+                    wf.pop(nid, None)
+                for nd in wf.values():
+                    for k, v in nd.get('inputs', {}).items():
+                        if isinstance(v, list) and v and str(v[0]) in lora_ids:
+                            if k == 'model':
+                                nd['inputs'][k] = [src_id, 0]
+                            elif k == 'clip':
+                                nd['inputs'][k] = clip_src
+    return wf
+
+
 UNSUPPORTED_ARCH = ('qwen-image', 'wan2', 'sam3', 'mmgp', 'rapid-aio')
 
 
@@ -431,7 +574,8 @@ def _guard_arch(c):
     return c
 
 
-def generate(positive, negative, width, height, steps, ckpt, seed, lora_name='', lora_strength=0.8):
+def generate(positive, negative, width, height, steps, ckpt, seed, lora_name='', lora_strength=0.8, workflow=None):
+    _refresh_paths()
     if not ensure_comfy():
         return '错误：ComfyUI 启动失败（请确认 ComfyUI 安装目录正确）'
     ckpt = _resolve_ckpt(ckpt)
@@ -441,9 +585,11 @@ def generate(positive, negative, width, height, steps, ckpt, seed, lora_name='',
     if seed < 0:
         # KSampler 不接受负种子（会 400 value_smaller_than_min），-1 表示随机
         seed = int(time.time() * 1000) % (2 ** 31 - 1)
-    wf = build_workflow(ckpt, positive, negative, int(width), int(height), int(steps), seed,
-                         lora_name=lora_name or _default_lora(ckpt or _default_ckpt()),
-                          lora_strength=lora_strength)
+    if not workflow:
+        workflow = _read_gen_workflow()
+    wf = _build_wf_from_template(ckpt, positive, negative, int(width), int(height), int(steps), seed,
+                                 lora_name=lora_name or _default_lora(ckpt or _default_ckpt()),
+                                 lora_strength=lora_strength, workflow=workflow)
     body = json.dumps({'prompt': wf}).encode('utf-8')
     req = urllib.request.Request(f'{OUT_URL}/prompt', data=body,
                                  headers={'Content-Type': 'application/json'})
@@ -496,9 +642,14 @@ def generate_image(prompt: str,
                    seed: int = -1,
                    stop_llm_first: bool = False,
                    lora_name: str = '',
-                   lora_strength: float = 0.8):
+                   lora_strength: float = 0.8,
+                   workflow: str = ''):
     """用 ComfyUI 生成本地图片（文生图）。prompt 为画面描述（可中文）；ckpt_name 留空则用默认模型；
-    seed 默认 -1 随机。生图前自动暂停本地聊天模型以释放显存，完成后自动恢复。"""
+    seed 默认 -1 随机；workflow 可指定 workflows 目录下的工作流文件（留空用控制台选择/模型分支默认）。
+    生图前自动暂停本地聊天模型以释放显存，完成后自动恢复。
+    重要：生图成功后，给用户的回复中必须用 markdown 图片语法引用图片：
+    ![图片](本地绝对路径)，即返回内容中给出的 path 字段（形如 L:\\ComfyUI\\ComfyUI\\output\\xxx.png），
+    禁止使用 http://127.0.0.1:8188/view? 这类 URL 引用图片，也禁止不引用图片。"""
     llm_argv = None
     # 显存不足（<6GB）时自动暂停 llama 释放显存，否则同时运行不等待
     if stop_llm_first or _vram_free_mb() < 6000:
@@ -506,18 +657,49 @@ def generate_image(prompt: str,
     try:
         result = generate(prompt, negative_prompt, width, height, steps,
                           ckpt_name or _default_ckpt(), seed,
-                          lora_name=lora_name, lora_strength=lora_strength)
+                          lora_name=lora_name, lora_strength=lora_strength,
+                          workflow=workflow or None)
     finally:
         if llm_argv:
             restore_llm(llm_argv)
-    # 成功出图时：返回文本 + 图片内容块（MCP 标准图片，OpenClaw 前端直接渲染）
-    import re
-    # 不返回 base64 图片内容（避免微信通道消息超大超时），靠文本里的 MEDIA: 指令触发发图
+    # 成功出图时：返回文本 + 图片内容块（MCP 标准 image content，OpenClaw 前端/微信通道直接渲染）
+    import re, base64
+    m = re.search(r'MEDIA:(.+)$', result, re.M)
+    if m and os.path.isfile(m.group(1).strip()):
+        img_path = m.group(1).strip()
+        try:
+            with open(img_path, 'rb') as f:
+                b64 = base64.b64encode(f.read()).decode('ascii')
+            text_part = re.sub(r'\n?MEDIA:.+$', '', result, flags=re.M).strip()
+            from urllib.parse import quote
+            subfolder = os.path.relpath(os.path.dirname(img_path), OUT_DIR)
+            if subfolder == '.':
+                subfolder = ''
+            img_url = f'{OUT_URL}/view?filename={quote(os.path.basename(img_path))}&subfolder={quote(subfolder)}&type=output'
+            # 在文本末尾附上 markdown 图片引用（本地绝对路径），供回复时直接采用：
+            # OpenClaw 会把它作为附件投递并转存为网关 URL，前端可直接显示。
+            text_with_img = text_part + f'\n\n![图片]({img_path})'
+            from mcp_types import CallToolResult, TextContent
+            return CallToolResult(
+                content=[
+                    TextContent(type='text', text=text_with_img),
+                    {'type': 'image', 'data': b64, 'mimeType': 'image/png'},
+                ],
+                structured_content={
+                    'media': {
+                        'path': img_path,
+                        'trustedLocalMedia': True,
+                    },
+                },
+            )
+        except Exception as e:
+            return result + f'\n（图片内嵌失败：{e}）'
     return result
 
 
 def _list_loras():
     """列出纯净版 loras 目录全部可用 LoRA（含子目录）"""
+    _refresh_paths()
     root = os.path.join(COMFY_CWD, 'models', 'loras')
     out = []
     if os.path.isdir(root):

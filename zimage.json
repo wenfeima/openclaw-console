@@ -1,0 +1,125 @@
+{
+ "3": {
+  "class_type": "KSampler",
+  "inputs": {
+   "cfg": 1,
+   "denoise": 1,
+   "seed": "{{seed}}",
+   "steps": 8,
+   "sampler_name": "euler",
+   "scheduler": "simple",
+   "latent_image": [
+    "6",
+    0
+   ],
+   "model": [
+    "4",
+    0
+   ],
+   "positive": [
+    "7",
+    0
+   ],
+   "negative": [
+    "8",
+    0
+   ]
+  }
+ },
+ "4": {
+  "class_type": "UNETLoader",
+  "inputs": {
+   "unet_name": "{{unet}}",
+   "weight_dtype": "default"
+  }
+ },
+ "5": {
+  "class_type": "VAELoader",
+  "inputs": {
+   "vae_name": "Z-image-vae.safetensors"
+  }
+ },
+ "6": {
+  "class_type": "EmptyFlux2LatentImage",
+  "inputs": {
+   "batch_size": 1,
+   "width": "{{width2}}",
+   "height": "{{height2}}"
+  }
+ },
+ "7": {
+  "class_type": "CLIPTextEncode",
+  "inputs": {
+   "clip": [
+    "9",
+    0
+   ],
+   "text": "{{positive}}"
+  }
+ },
+ "8": {
+  "class_type": "CLIPTextEncode",
+  "inputs": {
+   "clip": [
+    "9",
+    0
+   ],
+   "text": "{{negative}}"
+  }
+ },
+ "9": {
+  "class_type": "CLIPLoader",
+  "inputs": {
+   "clip_name": "qwen_3_4b.safetensors",
+   "type": "lumina2",
+   "device": "default"
+  }
+ },
+ "10": {
+  "class_type": "VAEDecode",
+  "inputs": {
+   "samples": [
+    "3",
+    0
+   ],
+   "vae": [
+    "5",
+    0
+   ]
+  }
+ },
+ "11": {
+  "class_type": "SaveImage",
+  "inputs": {
+   "filename_prefix": "mcp_zimg",
+   "images": [
+    "13",
+    0
+   ]
+  }
+ },
+ "12": {
+  "class_type": "VRAMCleanup",
+  "inputs": {
+   "anything": [
+    "10",
+    0
+   ],
+   "offload_model": true,
+   "offload_cache": true
+  }
+ },
+ "13": {
+  "class_type": "RAMCleanup",
+  "inputs": {
+   "anything": [
+    "12",
+    0
+   ],
+   "clean_file_cache": true,
+   "clean_processes": true,
+   "clean_dlls": true,
+   "retry_times": 3
+  }
+ }
+}

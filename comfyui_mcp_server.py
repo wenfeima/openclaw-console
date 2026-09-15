@@ -352,7 +352,7 @@ def build_workflow(ckpt, positive, negative, width, height, steps, seed, lora_na
                 'type': 'krea2', 'device': 'default'}},
             '10': {'class_type': 'VAEDecode', 'inputs': {'samples': ['3', 0], 'vae': ['5', 0]}},
             '11': {'class_type': 'SaveImage', 'inputs': {
-                'filename_prefix': 'mcp_krea', 'images': ['12', 0]}},
+                'filename_prefix': 'mcp_krea', 'images': ['13', 0]}},
             '12': {'class_type': 'VRAMCleanup', 'inputs': {
                 'anything': ['10', 0], 'offload_model': True, 'offload_cache': True}},
             '13': {'class_type': 'RAMCleanup', 'inputs': {
@@ -382,7 +382,7 @@ def build_workflow(ckpt, positive, negative, width, height, steps, seed, lora_na
                 'type': 'lumina2', 'device': 'default'}},
             '10': {'class_type': 'VAEDecode', 'inputs': {'samples': ['3', 0], 'vae': ['5', 0]}},
             '11': {'class_type': 'SaveImage', 'inputs': {
-                'filename_prefix': 'mcp_zimg', 'images': ['12', 0]}},
+                'filename_prefix': 'mcp_zimg', 'images': ['13', 0]}},
             '12': {'class_type': 'VRAMCleanup', 'inputs': {
                 'anything': ['10', 0], 'offload_model': True, 'offload_cache': True}},
             '13': {'class_type': 'RAMCleanup', 'inputs': {
@@ -404,7 +404,7 @@ def build_workflow(ckpt, positive, negative, width, height, steps, seed, lora_na
         '7': {'class_type': 'CLIPTextEncode', 'inputs': {'clip': ['4', 1], 'text': negative}},
         '8': {'class_type': 'VAEDecode', 'inputs': {'samples': ['3', 0], 'vae': ['4', 2]}},
         '9': {'class_type': 'SaveImage', 'inputs': {
-            'filename_prefix': 'mcp_gen', 'images': ['10', 0]}},
+            'filename_prefix': 'mcp_gen', 'images': ['11', 0]}},
         '10': {'class_type': 'VRAMCleanup', 'inputs': {
             'anything': ['8', 0], 'offload_model': True, 'offload_cache': True}},
         '11': {'class_type': 'RAMCleanup', 'inputs': {

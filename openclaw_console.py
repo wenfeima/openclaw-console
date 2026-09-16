@@ -1006,6 +1006,8 @@ class App:
         dbg_row2.grid(row=4, column=0, columnspan=10, sticky='we', padx=10, pady=(0, 10))
         ttk.Button(dbg_row2, text='🛜 启动Tailscale', command=self.tailscale_start).pack(side='left', padx=(0, 8))
         ttk.Button(dbg_row2, text='⚙️ Tailscale一键', style='Accent.TButton', command=self.tailscale_onekey).pack(side='left', padx=(0, 8))
+        ttk.Button(dbg_row2, text='清理内存', command=self.cleanup_ram).pack(side='left', padx=(0, 8))
+        ttk.Button(dbg_row2, text='清理显存', command=self.cleanup_vram).pack(side='left', padx=(0, 8))
 
         # ===== Tab 6：数字人（本地语音对话）=====
         tab_dh = ttk.Frame(nb, style='Panel.TFrame')

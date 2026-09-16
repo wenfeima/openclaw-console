@@ -996,18 +996,19 @@ class App:
 
         dbg_row = ttk.Frame(tab_dbg)
         dbg_row.grid(row=3, column=0, columnspan=10, sticky='we', padx=10, pady=(0, 10))
-        # 启动类（全清重启/重启网关）放最前面
-        ttk.Button(dbg_row, text='🔧 全清重启', style='Accent.TButton', command=self.clean_restart_gw).pack(side='left', padx=(0, 8))
-        ttk.Button(dbg_row, text='重启网关', command=self.restart_gw).pack(side='left', padx=(0, 8))
-        ttk.Button(dbg_row, text='测试模型API', command=self.test_llm_api).pack(side='left', padx=(0, 8))
-        ttk.Button(dbg_row, text='测试网关', command=self.test_gw).pack(side='left', padx=(0, 8))
-        ttk.Button(dbg_row, text='复制日志', command=self.copy_log).pack(side='left', padx=(0, 8))
+        # 启动类（全清重启/重启网关）放最前面；统一按钮宽度对齐
+        _BTN_W = 13
+        ttk.Button(dbg_row, text='🔧 全清重启', width=_BTN_W, style='Accent.TButton', command=self.clean_restart_gw).pack(side='left', padx=(0, 8))
+        ttk.Button(dbg_row, text='重启网关', width=_BTN_W, command=self.restart_gw).pack(side='left', padx=(0, 8))
+        ttk.Button(dbg_row, text='测试模型API', width=_BTN_W, command=self.test_llm_api).pack(side='left', padx=(0, 8))
+        ttk.Button(dbg_row, text='测试网关', width=_BTN_W, command=self.test_gw).pack(side='left', padx=(0, 8))
+        ttk.Button(dbg_row, text='复制日志', width=_BTN_W, command=self.copy_log).pack(side='left', padx=(0, 8))
         dbg_row2 = ttk.Frame(tab_dbg)
         dbg_row2.grid(row=4, column=0, columnspan=10, sticky='we', padx=10, pady=(0, 10))
-        ttk.Button(dbg_row2, text='🛜 启动Tailscale', command=self.tailscale_start).pack(side='left', padx=(0, 8))
-        ttk.Button(dbg_row2, text='⚙️ Tailscale一键', style='Accent.TButton', command=self.tailscale_onekey).pack(side='left', padx=(0, 8))
-        ttk.Button(dbg_row2, text='清理内存', command=self.cleanup_ram).pack(side='left', padx=(0, 8))
-        ttk.Button(dbg_row2, text='清理显存', command=self.cleanup_vram).pack(side='left', padx=(0, 8))
+        ttk.Button(dbg_row2, text='🛜 启动Tailscale', width=_BTN_W, command=self.tailscale_start).pack(side='left', padx=(0, 8))
+        ttk.Button(dbg_row2, text='⚙️ Tailscale一键', width=_BTN_W, style='Accent.TButton', command=self.tailscale_onekey).pack(side='left', padx=(0, 8))
+        ttk.Button(dbg_row2, text='清理内存', width=_BTN_W, command=self.cleanup_ram).pack(side='left', padx=(0, 8))
+        ttk.Button(dbg_row2, text='清理显存', width=_BTN_W, command=self.cleanup_vram).pack(side='left', padx=(0, 8))
 
         # ===== Tab 6：数字人（本地语音对话）=====
         tab_dh = ttk.Frame(nb, style='Panel.TFrame')

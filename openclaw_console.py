@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-OpenClaw 控制台 v2.6
+OpenClaw 控制台 v3.0
 管理本地模型服务(llama-server) + OpenClaw Gateway + 控制台入口
 v2.3: 修网关启动走 --task-supervisor 重启循环；修 RAMCleanup 参数 400；生图模型列表异步加载不再卡启动；
       单实例锁；开机自启 mmproj 覆盖参数；清理显存链式挂 RAMCleanup；路径跟随配置
@@ -10,6 +10,11 @@ v2.5: 生图链路完全修复脚本（apply_openclaw_patches.py）：OpenClaw �
       路径保存后自动重打媒体白名单（跟随新 comfy_root），解决"生图成功但前端不显示图片"
 v2.6: 日志窗口新增「网关」页签（gateway.log 实时尾随）；主窗口顶部新增全局硬件状态栏
       （CPU/内存/GPU/显存/温度，切任意页签可见）
+v2.7: 数字人服务接入控制台（8765 语音后端 / 7860 前端 / 8010 口型同步三件套 + 大模型统一 8080）；
+      ComfyUI 版本可选与路径跟随
+v2.8: 数字人页签优化：服务状态灯、一键启停；模型页大模型选择与一键恢复入口
+v2.9: 生图链路输出目录统一；自定义 ComfyUI 路径应用
+v3.0: 数字人服务状态灯自动刷新（每 15s 轮询，不再需要重启控制台看灯）
 """
 import os, sys, json, time, glob, io, subprocess, threading, webbrowser, tkinter as tk
 from tkinter import ttk, messagebox
@@ -25,6 +30,7 @@ _BASE_DIR = r'L:\OpenClaw\OpenClawData\console'
 if not os.path.isdir(_BASE_DIR):
     _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _PATHS_CFG = os.path.join(_BASE_DIR, 'paths.json')
+_UI_STATE_CFG = os.path.join(_BASE_DIR, 'ui_state.json')   # 窗口大小/位置记忆
 _DEFAULT_PATHS = {
     'llama_dir':      r'L:\OpenClaw\llama',
     'comfy_root':     r'L:\OpenClaw\ComfyUI',
@@ -313,6 +319,9 @@ LOG_DIR    = r'L:\OpenClaw\OpenClawData\console\logs'
 LLAMA_LOG  = os.path.join(LOG_DIR, 'llama.log')
 COMFY_LOG  = os.path.join(LOG_DIR, 'comfyui.log')
 GATEWAY_LOG = os.path.join(LOG_DIR, 'gateway.log')
+DH_LOG    = os.path.join(LOG_DIR, 'digital_human.log')
+DH_S2S_LOG = r'\\wsl$\Ubuntu-24.04\root\s2s\logs\s2s.log'
+DH_WEB_LOG = r'\\wsl$\Ubuntu-24.04\root\s2s\logs\web.log'
 WF_PORT    = 8756
 WF_HTML    = os.path.join(_BASE_DIR, 'workflow_editor.html')
 WF_DIR     = os.path.join(_BASE_DIR, 'workflows')
@@ -607,7 +616,7 @@ def stop_pid(pid):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title('OpenClaw 控制台 v2.6')
+        root.title('OpenClaw 控制台 v3.0')
         root.geometry('980x540')
         root.minsize(760, 440)
         root.configure(bg='#2b2b2b')
@@ -619,7 +628,7 @@ class App:
         self.log_win = None
         self._log_win_text = None
         self._log_buffer = []
-        self._log_buffers = {'console': [], 'llm': [], 'comfy': [], 'gw': []}
+        self._log_buffers = {'console': [], 'llm': [], 'comfy': [], 'gw': [], 'dh': []}
         self._log_texts = {}
         self._tail_pos = {}
         self._tails_on = True
@@ -768,6 +777,8 @@ class App:
         self.btn_llm_stop.pack(side='left', padx=(0, 16))
         self.btn_hw = ttk.Button(row6, text='硬件配置', width=7, command=self.show_hardware)
         self.btn_hw.pack(side='left', padx=(0, 6))
+        self.btn_api_params = ttk.Button(row6, text='API参数', width=7, command=self.show_api_params)
+        self.btn_api_params.pack(side='left', padx=(0, 6))
         self.btn_restore = ttk.Button(row6, text='一键恢复', width=7, command=self._restore_all)
         self.btn_restore.pack(side='left')
 
@@ -809,6 +820,8 @@ class App:
         self.gen_wf_combo.bind('<<ComboboxSelected>>', self._save_gen_workflow)
         self.btn_wf_refresh = ttk.Button(tab_model, text='刷新', width=4, command=self._refresh_gen_workflows)
         self.btn_wf_refresh.grid(row=5, column=3, sticky='w')
+        self.btn_wf_open = ttk.Button(tab_model, text='打开', width=4, command=self.open_wf_dir)
+        self.btn_wf_open.grid(row=5, column=4, sticky='w', padx=(4, 0))
         self._refresh_gen_workflows(initial=True)
 
         tab_model.columnconfigure(1, weight=1)
@@ -967,7 +980,8 @@ class App:
         env_row = ttk.Frame(tab_dbg)
         env_row.grid(row=1, column=0, columnspan=10, sticky='we', padx=10, pady=(0, 4))
         kinds = [('node', 'Node.js'), ('openclaw', 'OpenClaw'), ('llama', 'llama.cpp'),
-                 ('models', '模型文件'), ('cfg', '网关配置'), ('tailscale', 'Tailscale')]
+                 ('models', '模型文件'), ('gpu', 'GPU体检'), ('cfg', '网关配置'),
+                 ('tailscale', 'Tailscale')]
         for i, (kind, label) in enumerate(kinds):
             f = ttk.Frame(env_row)
             f.grid(row=i // 3, column=i % 3, padx=(0, 18), pady=2, sticky='w')
@@ -993,24 +1007,92 @@ class App:
         ttk.Button(dbg_row2, text='🛜 启动Tailscale', command=self.tailscale_start).pack(side='left', padx=(0, 8))
         ttk.Button(dbg_row2, text='⚙️ Tailscale一键', style='Accent.TButton', command=self.tailscale_onekey).pack(side='left', padx=(0, 8))
 
+        # ===== Tab 6：数字人（本地语音对话）=====
+        tab_dh = ttk.Frame(nb, style='Panel.TFrame')
+        nb.add(tab_dh, text=' 数字人 ')
+        ttk.Label(tab_dh, text='AI 数字人（本地大模型 + 君仪音色 + 口型同步）', style='Panel.TLabel',
+                  font=('Microsoft YaHei UI', 11, 'bold')).grid(row=0, column=0, columnspan=8, sticky='w', padx=10, pady=(10, 4))
+
+        self.dh_lamps = {}
+        dh_row = ttk.Frame(tab_dh)
+        dh_row.grid(row=1, column=0, columnspan=8, sticky='we', padx=10, pady=(0, 6))
+        for i, (key, label, port) in enumerate([
+            ('llama', '大模型 8080', 8080),
+            ('s2s', '语音后端 8765', 8765),
+            ('web', '对话前端 7860', 7860),
+            ('lt', '口型同步 8010', 8010),
+        ]):
+            f = ttk.Frame(dh_row)
+            f.grid(row=0, column=i, padx=(0, 24), pady=2, sticky='w')
+            lamp = tk.Canvas(f, width=14, height=14, bg=c['panel'], highlightthickness=0)
+            lamp.pack(side='left', padx=(0, 4))
+            ttk.Label(f, text=label, style='Panel.TLabel', width=14, anchor='w').pack(side='left')
+            self.dh_lamps[key] = lamp
+
+        dh_btn = ttk.Frame(tab_dh)
+        dh_btn.grid(row=2, column=0, columnspan=8, sticky='we', padx=10, pady=(0, 8))
+        self.btn_dh_start = ttk.Button(dh_btn, text='▶  启动数字人', style='Accent.TButton', command=self.start_dh)
+        self.btn_dh_start.pack(side='left', padx=(0, 8))
+        self.btn_dh_stop = ttk.Button(dh_btn, text='■  停止数字人', style='Stop.TButton', command=self.stop_dh)
+        self.btn_dh_stop.pack(side='left', padx=(0, 8))
+        self.btn_dh_open = ttk.Button(dh_btn, text='打开对话前端', command=self.open_dh_frontend)
+        self.btn_dh_open.pack(side='left', padx=(0, 8))
+        self.btn_dh_refresh = ttk.Button(dh_btn, text='刷新状态', command=self.refresh_dh)
+        self.btn_dh_refresh.pack(side='left', padx=(0, 8))
+
+        ttk.Separator(tab_dh, orient='horizontal').grid(row=3, column=0, columnspan=8, sticky='we', padx=10, pady=(0, 6))
+        ttk.Label(tab_dh, text='手机访问（同一局域网）', style='Panel.TLabel',
+                  font=('Microsoft YaHei UI', 11, 'bold')).grid(row=4, column=0, columnspan=8, sticky='w', padx=10, pady=(4, 2))
+        self.dh_mobile = tk.StringVar(value='—')
+        ttk.Label(tab_dh, textvariable=self.dh_mobile, style='Dim.TLabel').grid(row=5, column=0, columnspan=6, sticky='w', padx=10, pady=2)
+        ttk.Button(tab_dh, text='复制局域网地址', command=self.copy_dh_mobile).grid(row=5, column=6, sticky='we', padx=(0, 10), pady=2)
+
+        ttk.Label(tab_dh, text='广域网访问（Tailscale，外网也能连）', style='Panel.TLabel',
+                  font=('Microsoft YaHei UI', 11, 'bold')).grid(row=6, column=0, columnspan=8, sticky='w', padx=10, pady=(6, 2))
+        self.dh_wan = tk.StringVar(value='—')
+        ttk.Label(tab_dh, textvariable=self.dh_wan, style='Dim.TLabel').grid(row=7, column=0, columnspan=6, sticky='w', padx=10, pady=2)
+        ttk.Button(tab_dh, text='复制广域网地址', command=self.copy_dh_wan).grid(row=7, column=6, sticky='we', padx=(0, 10), pady=2)
+        ttk.Label(tab_dh, text='提示：首次启动需 3-5 分钟加载语音模型；无麦克风时前端自动降级为打字模式。',
+                  style='Dim.TLabel').grid(row=8, column=0, columnspan=8, sticky='w', padx=10, pady=(4, 10))
+
         # ===== 日志区 =====（已移至独立磁吸窗口，顶部“日志”按钮打开）
 
-        self.log('OpenClaw 控制台 v2.6 启动')
+        self.log('OpenClaw 控制台 v3.0 启动')
         self.log(f'模型目录: {MODELS_DIR}')
         self.log(f'网关: {DASH_URL}')
 
         # 窗口贴屏幕底边（固定高度，避免 Notebook 请求高度撑爆窗口贴顶）
+        # 默认 840 宽；若 ui_state.json 有上次记忆的尺寸/位置则优先恢复
         try:
             _sw = root.winfo_screenwidth()
             _sh = root.winfo_screenheight()
-            _win_w = min(980, _sw - 40)
-            _win_h = min(540, _sh - 90)
-            _x = max((_sw - _win_w) // 2, 0)
-            _y = max(_sh - _win_h - 56, 24)
+            _saved = {}
+            try:
+                if os.path.isfile(_UI_STATE_CFG):
+                    with io.open(_UI_STATE_CFG, 'r', encoding='utf-8') as _f:
+                        _saved = json.load(_f)
+            except Exception:
+                _saved = {}
+            _win_w = int(_saved.get('w', 840))
+            _win_h = int(_saved.get('h', 540))
+            _win_w = min(_win_w, _sw - 40)
+            _win_h = min(_win_h, _sh - 90)
+            _win_w = max(_win_w, 760)
+            _win_h = max(_win_h, 440)
+            if 'x' in _saved and 'y' in _saved:
+                _x = int(_saved.get('x', 0))
+                _y = int(_saved.get('y', 0))
+            else:
+                _x = max((_sw - _win_w) // 2, 0)
+                _y = max(_sh - _win_h - 56, 24)
             root.geometry(f'{_win_w}x{_win_h}+{_x}+{_y}')
         except Exception:
             pass
         self.root.after(300, self._refresh_env)
+        self.root.after(1500, self.refresh_dh)
+        # 数字人灯周期性自动刷新（warmup 需 3-4 分钟，一次性刷新会导致
+        # 打开控制台时 8765 还在加载 → 永远红灯，直到手动点刷新）
+        self.root.after(15000, self._dh_periodic)
 
     # ---------- 日志 ----------
     def log(self, msg, key='console'):
@@ -1018,7 +1100,7 @@ class App:
         with log_lock:
             bufs = getattr(self, '_log_buffers', None)
             if bufs is None:
-                self._log_buffers = {'console': [], 'llm': [], 'comfy': [], 'gw': []}
+                self._log_buffers = {'console': [], 'llm': [], 'comfy': [], 'gw': [], 'dh': []}
                 bufs = self._log_buffers
             buf = bufs.setdefault(key, [])
             buf.append(line)
@@ -1063,6 +1145,8 @@ class App:
                         n_models += 1
             res['models'] = n_models > 0
             res['cfg'] = os.path.isfile(CONFIG_PATH) and bool(gw_token())
+            # GPU 体检（静态层：ggml-cuda.dll + CUDA12 运行时 DLL，不加载模型）
+            res['gpu'] = self._gpu_static_ok()
             try:
                 env = dict(os.environ)
                 env['PATH'] = r'C:\Program Files\Tailscale;' + env.get('PATH', '')
@@ -1079,12 +1163,16 @@ class App:
                     n = sum(1 for f in os.listdir(MODELS_DIR)
                             if f.endswith('.gguf') and not f.lower().startswith('mmproj'))
                     btn.config(text='目录', state='normal')
+                elif kind == 'gpu' and ok:
+                    btn.config(text='检测', state='normal')
                 elif ok:
                     btn.config(text='就绪', state='disabled')
                 elif kind == 'models':
                     btn.config(text='建目录', state='normal')
                 elif kind == 'cfg':
                     btn.config(text='查看', state='normal')
+                elif kind == 'gpu':
+                    btn.config(text='检测', state='normal')
                 elif kind == 'tailscale':
                     btn.config(text='启动', state='normal')
                 else:
@@ -1107,6 +1195,9 @@ class App:
             except Exception as e:
                 self.log('打开配置目录失败: ' + str(e))
             return
+        if kind == 'gpu':
+            self.run_gpu_check()
+            return
         if kind == 'tailscale':
             self.tailscale_start()
             return
@@ -1124,6 +1215,51 @@ class App:
             'openclaw': self._install_openclaw,
             'llama': self._install_llama,
         }[kind], daemon=True).start()
+
+    # ---------- GPU 体检 ----------
+    def _gpu_static_ok(self):
+        """静态检测：ggml-cuda.dll 存在且 CUDA12 运行时 DLL 齐全（不加载模型，秒回）"""
+        try:
+            for root in (COMFY_ROOT, os.path.join(_BASE_DIR, '..', '..', 'ComfyUI')):
+                lib = os.path.join(root, 'python_embeded', 'Lib', 'site-packages', 'llama_cpp', 'lib')
+                if not os.path.isdir(lib):
+                    continue
+                gpu_dll = os.path.join(lib, 'ggml-cuda.dll')
+                need = ('cudart64_12.dll', 'cublas64_12.dll', 'cublasLt64_12.dll')
+                if os.path.isfile(gpu_dll) and all(os.path.isfile(os.path.join(lib, d)) for d in need):
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def run_gpu_check(self):
+        """完整 GPU 体检（三层：文件/依赖链/运行时加载模型实测）"""
+        script = os.path.join(_BASE_DIR, 'console', 'llama_gpu_check.py')
+        if not os.path.isfile(script):
+            self.log('GPU体检脚本不存在: ' + script)
+            return
+        def work():
+            self.log('=== GPU 体检（运行时实测，需加载一次小模型，约10~30秒）===')
+            self.log(f'使用脚本: {script}')
+            try:
+                # 用控制台自带 python 跑（内部会调 ComfyUI 的 python_embeded）
+                py = os.path.join(_BASE_DIR, '..', 'python', 'python.exe')
+                r = subprocess.run([py, script, COMFY_ROOT], capture_output=True, text=True,
+                                   encoding='utf-8', errors='replace', timeout=240,
+                                   creationflags=0x08000000)
+                out = (r.stdout or '') + (r.stderr or '')
+                for line in out.splitlines():
+                    if line.strip():
+                        self.log('  ' + line)
+                if r.returncode == 0:
+                    self.log('=== GPU 体检完成：全部正常，GPU 加速可用 ===')
+                else:
+                    self.log('=== GPU 体检完成：存在问题，见上方 [X] 项 ===')
+                # 刷新状态灯
+                self.root.after(0, self._refresh_env)
+            except Exception as e:
+                self.log('GPU体检失败: ' + str(e))
+        threading.Thread(target=work, daemon=True).start()
 
     # ---------- Tailscale ----------
     def _ts(self, args, timeout=30):
@@ -1302,7 +1438,7 @@ class App:
         nb = ttk.Notebook(win)
         nb.pack(fill='both', expand=True, padx=8, pady=8)
         self._log_texts = {}
-        for key, label in [('console', '控制台'), ('llm', '模型 LLM'), ('comfy', 'ComfyUI'), ('gw', '网关')]:
+        for key, label in [('console', '控制台'), ('llm', '模型 LLM'), ('comfy', 'ComfyUI'), ('gw', '网关'), ('dh', '数字人')]:
             page = tk.Frame(nb, bg='#1e1e1e')
             t = tk.Text(page, bg='#1e1e1e', fg='#c8c8c8', font=('Consolas', 9),
                         wrap='word', relief='flat', borderwidth=0, state='disabled')
@@ -1601,14 +1737,17 @@ class App:
 
     # ---------- 生图工作流选择 ----------
     def _refresh_gen_workflows(self, initial=False):
-        """递归列出 workflows 目录的 .json 模板（含子目录、不含 .ui.json），载入已保存默认"""
+        """递归列出 workflows 目录的 .json 模板（含子目录、不含 .ui.json/缓存），载入已保存默认"""
         try:
             files = []
             for dp, dns, fns in os.walk(WF_DIR):
                 for fn in sorted(fns):
-                    if fn.endswith('.json') and not fn.endswith('.ui.json'):
-                        rel = os.path.relpath(os.path.join(dp, fn), WF_DIR).replace('\\', '/')
-                        files.append(rel)
+                    if not fn.endswith('.json') or fn.endswith('.ui.json'):
+                        continue
+                    if fn in ('object_info_cache.json',) or fn.startswith('object_info'):
+                        continue
+                    rel = os.path.relpath(os.path.join(dp, fn), WF_DIR).replace('\\', '/')
+                    files.append(rel)
             files.sort()
         except Exception:
             files = []
@@ -1640,6 +1779,15 @@ class App:
         except Exception as e:
             self.log('保存生图工作流失败：' + str(e))
 
+    def open_wf_dir(self):
+        """打开生图工作流模板文件夹（workflows）"""
+        try:
+            os.makedirs(WF_DIR, exist_ok=True)
+            os.startfile(WF_DIR)
+            self.log('已打开工作流文件夹：' + WF_DIR)
+        except Exception as e:
+            self.log('打开工作流文件夹失败：' + str(e))
+
     def open_upload_dir(self):
         """打开上传文件夹（微信/网页收到的图）"""
         d = os.path.join(os.path.dirname(CONFIG_PATH), 'media', 'inbound')
@@ -1655,6 +1803,85 @@ class App:
         self.log('已打开生成文件夹：' + d)
 
     # ---------- 硬件配置 ----------
+    # ---------- 模型 API 参数（maxTokens / timeoutSeconds） ----------
+    def show_api_params(self):
+        """弹窗：修改 openclaw.json 中 local-model 的 maxTokens 与 timeoutSeconds"""
+        cfg_path = os.path.join(os.path.dirname(_BASE_DIR), 'openclaw.json')
+        if not os.path.isfile(cfg_path):
+            self.log('openclaw.json 不存在: ' + str(cfg_path))
+            messagebox.showerror('错误', '未找到 openclaw.json：' + str(cfg_path))
+            return
+
+        def load_vals():
+            try:
+                cfg = json.loads(io.open(cfg_path, encoding='utf-8').read() or '{}')
+                prov = (cfg.get('models') or {}).get('providers') or {}
+                for k, v in prov.items():
+                    for m in (v.get('models') or []):
+                        if m.get('id') == 'local-model':
+                            return int(m.get('maxTokens') or 16384), int(v.get('timeoutSeconds') or 300), v.get('baseUrl', '')
+            except Exception:
+                pass
+            return 16384, 300, ''
+
+        win = tk.Toplevel(self.root)
+        win.title('模型 API 参数')
+        win.configure(bg='#2d2d2d')
+        win.geometry('520x300')
+        win.transient(self.root)
+        win.grab_set()
+        f = ttk.Frame(win, style='Panel.TFrame')
+        f.pack(fill='both', expand=True, padx=12, pady=12)
+
+        mt, ts, base = load_vals()
+        ttk.Label(f, text='本地模型 API 参数（写入 openclaw.json）', style='Panel.TLabel',
+                  font=('Microsoft YaHei UI', 11, 'bold')).grid(row=0, column=0, columnspan=2, sticky='w', padx=10, pady=(10, 8))
+        ttk.Label(f, text='API 地址', style='Dim.TLabel').grid(row=1, column=0, sticky='w', padx=10, pady=4)
+        ttk.Label(f, text=base or '（未识别）', style='Panel.TLabel').grid(row=1, column=1, sticky='w', padx=10, pady=4)
+        ttk.Label(f, text='maxTokens（单次最大输出 token 数）', style='Dim.TLabel').grid(row=2, column=0, sticky='w', padx=10, pady=4)
+        mt_var = tk.StringVar(value=str(mt))
+        tk.Spinbox(f, from_=256, to=65536, increment=256, textvariable=mt_var, width=14,
+                   bg='#3c3c3c', fg='#e8e8e8', insertbackground='#e8e8e8',
+                   buttonbackground='#555').grid(row=2, column=1, sticky='w', padx=10, pady=4)
+        ttk.Label(f, text='timeoutSeconds（请求超时，秒）', style='Dim.TLabel').grid(row=3, column=0, sticky='w', padx=10, pady=4)
+        ts_var = tk.StringVar(value=str(ts))
+        tk.Spinbox(f, from_=30, to=3600, increment=30, textvariable=ts_var, width=14,
+                   bg='#3c3c3c', fg='#e8e8e8', insertbackground='#e8e8e8',
+                   buttonbackground='#555').grid(row=3, column=1, sticky='w', padx=10, pady=4)
+        ttk.Label(f, text='改完需重启网关生效', style='Dim.TLabel').grid(row=4, column=0, columnspan=2, sticky='w', padx=10, pady=(8, 2))
+
+        def save():
+            try:
+                mt2, ts2 = int(mt_var.get()), int(ts_var.get())
+            except Exception:
+                messagebox.showwarning('提示', '请输入数字')
+                return
+            try:
+                cfg = json.loads(io.open(cfg_path, encoding='utf-8').read() or '{}')
+                prov = (cfg.get('models') or {}).setdefault('providers', {})
+                found = False
+                for k, v in prov.items():
+                    if v.get('baseUrl', '').find('127.0.0.1:8080') >= 0:
+                        for m in (v.get('models') or []):
+                            if m.get('id') == 'local-model':
+                                m['maxTokens'] = mt2
+                                v['timeoutSeconds'] = ts2
+                                found = True
+                if not found:
+                    messagebox.showerror('错误', '未找到 local-model 配置')
+                    return
+                io.open(cfg_path, 'w', encoding='utf-8', newline='\n').write(
+                    json.dumps(cfg, ensure_ascii=False, indent=2))
+                self.log(f'模型 API 参数已保存: maxTokens={mt2}, timeoutSeconds={ts2}（重启网关生效）')
+                win.destroy()
+            except Exception as e:
+                messagebox.showerror('错误', '保存失败: ' + str(e))
+
+        btns = tk.Frame(win, bg='#2d2d2d')
+        btns.pack(fill='x', padx=12, pady=(0, 12))
+        ttk.Button(btns, text='保存', style='Accent.TButton', command=save).pack(side='right', padx=(8, 0))
+        ttk.Button(btns, text='关闭', command=win.destroy).pack(side='right')
+
     def show_hardware(self):
         """检测硬件 -> 推荐配置 -> 一键应用"""
         hw = detect_hardware()
@@ -2095,36 +2322,42 @@ class App:
         except Exception:
             pass
 
-    def _start_tail(self, path, key):
-        """后台线程：先回填日志文件尾部若干行，再增量读新日志，写入对应页签缓冲"""
+    def _start_tail(self, paths, key):
+        """后台线程：先回填日志文件尾部若干行，再增量读新日志，写入对应页签缓冲
+        支持 paths 传字符串或路径列表（多日志合一页签，带 [文件名] 前缀）"""
+        if isinstance(paths, str):
+            paths = [paths]
         if key in getattr(self, '_tail_started', set()):
             return
         self._tail_started.add(key)
         def run():
-            pos = 0
+            pos = {}
             try:
-                if os.path.isfile(path):
-                    with io.open(path, 'r', encoding='utf-8', errors='replace') as f:
-                        data = f.read()
-                    lines = data.splitlines()
-                    for line in lines[-400:]:
-                        if line.strip():
-                            self.log(line[:300], key)
-                    pos = os.path.getsize(path)
+                for path in paths:
+                    if os.path.isfile(path):
+                        with io.open(path, 'r', encoding='utf-8', errors='replace') as f:
+                            data = f.read()
+                        lines = data.splitlines()
+                        for line in lines[-400:]:
+                            if line.strip():
+                                self.log(f'[{os.path.basename(path)}] {line}'[:320], key)
+                        pos[path] = os.path.getsize(path)
             except Exception:
-                pos = 0
+                pass
             while getattr(self, '_tails_on', True):
                 try:
-                    if os.path.isfile(path):
+                    for path in paths:
+                        if not os.path.isfile(path):
+                            continue
                         size = os.path.getsize(path)
-                        if size > pos:
+                        if size > pos.get(path, 0):
                             with io.open(path, 'r', encoding='utf-8', errors='replace') as f:
-                                f.seek(pos)
+                                f.seek(pos.get(path, 0))
                                 data = f.read()
-                            pos = size
+                            pos[path] = size
                             for line in data.splitlines():
                                 if line.strip():
-                                    self.log(line[:300], key)
+                                    self.log(f'[{os.path.basename(path)}] {line}'[:320], key)
                 except Exception:
                     pass
                 time.sleep(0.8)
@@ -2135,6 +2368,7 @@ class App:
         self._start_tail(LLAMA_LOG, 'llm')
         self._start_tail(COMFY_LOG, 'comfy')
         self._start_tail(GATEWAY_LOG, 'gw')
+        self._start_tail([DH_LOG, DH_S2S_LOG, DH_WEB_LOG], 'dh')
 
     def _wait_llm_ready(self):
         for _ in range(180):
@@ -2517,6 +2751,125 @@ class App:
         webbrowser.open(url)
         self.log('已在浏览器打开控制台')
 
+    # ---------- 数字人 ----------
+    DH_DIR = r'L:\AI数字人'
+    DH_PORTS = {'llama': 8080, 's2s': 8765, 'web': 7860, 'lt': 8010}
+
+    def _port_open(self, port, host='127.0.0.1'):
+        import socket as _s
+        try:
+            s = _s.socket(_s.AF_INET, _s.SOCK_STREAM)
+            s.settimeout(0.6)
+            s.connect((host, port))
+            s.close()
+            return True
+        except Exception:
+            return False
+
+    def _set_lamp_color(self, canvas, color):
+        canvas.delete('all')
+        canvas.create_oval(1, 1, 13, 13, fill=color, outline='')
+
+    def refresh_dh(self):
+        for key, port in self.DH_PORTS.items():
+            lamp = self.dh_lamps.get(key)
+            if lamp:
+                self._set_lamp_color(lamp, '#2ecc71' if self._port_open(port) else '#e74c3c')
+        # 局域网地址
+        try:
+            import socket as _s
+            ip = _s.gethostbyname(_s.gethostname())
+        except Exception:
+            ip = '127.0.0.1'
+        self.dh_mobile.set(f'http://{ip}:7860/  （前端 7860 需启动）')
+        # 广域网（Tailscale）
+        try:
+            r = subprocess.run(['tailscale', 'ip', '-4'], capture_output=True, text=True,
+                               timeout=5, encoding='utf-8', errors='replace',
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            ts_ip = r.stdout.strip().splitlines()[0].strip() if r.stdout.strip() else ''
+        except Exception:
+            ts_ip = ''
+        if ts_ip:
+            self.dh_wan.set(f'http://{ts_ip}:7860/  （手机需装 Tailscale 并登录同账号）')
+        else:
+            self.dh_wan.set('Tailscale 未运行 · 点「网关」页一键启动 Tailscale')
+
+    def _dh_periodic(self):
+        # 周期性刷新数字人灯（每 15 秒），warmup 完成后自动变绿
+        try:
+            self.refresh_dh()
+        except Exception:
+            pass
+        self.root.after(15000, self._dh_periodic)
+
+    def start_dh(self):
+        self.log('启动数字人...')
+        script = os.path.join(self.DH_DIR, 'start_digital_human.py')
+        if not os.path.isfile(script):
+            self.log('⚠ 未找到启动脚本: ' + script)
+            return
+        try:
+            logf = io.open(os.path.join(LOG_DIR, 'digital_human.log'), 'a',
+                            encoding='utf-8', errors='replace', buffering=1)
+            subprocess.Popen([sys.executable, script],
+                             stdout=logf, stderr=subprocess.STDOUT,
+                             creationflags=subprocess.CREATE_NO_WINDOW,
+                             cwd=self.DH_DIR)
+            self.log('已后台启动数字人（首次加载约 3-5 分钟）...')
+        except Exception as e:
+            self.log('数字人启动异常: ' + str(e))
+            return
+        self.root.after(8000, self.refresh_dh)
+
+    def stop_dh(self):
+        self.log('停止数字人...')
+        script = os.path.join(self.DH_DIR, 'stop_digital_human.py')
+        if not os.path.isfile(script):
+            self.log('⚠ 未找到停止脚本: ' + script)
+            return
+        try:
+            subprocess.run([sys.executable, script],
+                           capture_output=True, text=True, timeout=60,
+                           encoding='utf-8', errors='replace',
+                           creationflags=subprocess.CREATE_NO_WINDOW,
+                           cwd=self.DH_DIR)
+            self.log('✅ 数字人已停止（保留大模型）')
+        except Exception as e:
+            self.log('停止数字人异常: ' + str(e))
+        self.root.after(2000, self.refresh_dh)
+
+    def open_dh_frontend(self):
+        webbrowser.open('http://127.0.0.1:7860/')
+        self.log('已在浏览器打开数字人对话前端')
+
+    def copy_dh_mobile(self):
+        try:
+            import socket as _s
+            ip = _s.gethostbyname(_s.gethostname())
+        except Exception:
+            ip = '127.0.0.1'
+        url = f'http://{ip}:7860/'
+        self.root.clipboard_clear()
+        self.root.clipboard_append(url)
+        self.log('已复制局域网地址: ' + url)
+
+    def copy_dh_wan(self):
+        try:
+            r = subprocess.run(['tailscale', 'ip', '-4'], capture_output=True, text=True,
+                               timeout=5, encoding='utf-8', errors='replace',
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            ts_ip = r.stdout.strip().splitlines()[0].strip() if r.stdout.strip() else ''
+        except Exception:
+            ts_ip = ''
+        if not ts_ip:
+            self.log('⚠ Tailscale 未运行，无法获取广域网地址')
+            return
+        url = f'http://{ts_ip}:7860/'
+        self.root.clipboard_clear()
+        self.root.clipboard_append(url)
+        self.log('已复制广域网地址: ' + url)
+
     # ---------- 开机自启 ----------
     def _autostart_exists(self):
         return os.path.isfile(AUTOSTART_VBS)
@@ -2701,6 +3054,18 @@ class App:
 
     def on_close(self):
         self._polling = False
+        # 记忆窗口大小/位置，下次启动恢复
+        try:
+            geo = self.root.geometry()   # 形如 '980x540+100+50'
+            import re as _re
+            m = _re.match(r'(\d+)x(\d+)\+(-?\d+)\+(-?\d+)', geo)
+            if m:
+                _state = {'w': int(m.group(1)), 'h': int(m.group(2)),
+                          'x': int(m.group(3)), 'y': int(m.group(4))}
+                with io.open(_UI_STATE_CFG, 'w', encoding='utf-8') as _f:
+                    json.dump(_state, _f)
+        except Exception:
+            pass
         self.root.destroy()
 
 def _ensure_single_instance():

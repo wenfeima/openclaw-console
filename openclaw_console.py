@@ -973,10 +973,29 @@ class App:
         ttk.Button(tg_row, text='\U0001f595 打开界面', width=10, command=self.open_textgen).pack(side='left', padx=(8, 0))
         ttk.Button(tg_row, text='\U0001f4c1 文件夹', width=10, command=self.open_textgen_dir).pack(side='left', padx=(8, 0))
 
-        ttk.Label(tab_textgen,
-                  text='端口 %d（避开 ComfyUI 8188）。首次使用先在此选好安装目录并保存；若目录未装请先用 git clone oobabooga/text-generation-webui。' % TEXTGEN_PORT,
-                  style='Dim.TLabel').grid(row=4, column=0, columnspan=4, sticky='w', padx=10, pady=(6, 4))
+        # 模式切换行
+        mode_row = tk.Frame(tab_textgen, bg='#383838')
+        mode_row.grid(row=4, column=0, columnspan=4, sticky='we', padx=10, pady=(4, 2))
+        ttk.Label(mode_row, text='模式：', style='Panel.TLabel').pack(side='left')
+        self.tg_mode_var = tk.StringVar(value='remote')
+        ttk.Radiobutton(mode_row, text='复用 llama-server', value='remote', variable=self.tg_mode_var,
+                        command=self._tg_mode_changed).pack(side='left', padx=(4, 12))
+        ttk.Radiobutton(mode_row, text='本地加载模型', value='local', variable=self.tg_mode_var,
+                        command=self._tg_mode_changed).pack(side='left')
+
+        # 本地模型选择行（仅本地模式可见）
+        self.tg_model_row = tk.Frame(tab_textgen, style='Panel.TFrame')
+        self.tg_model_row.grid(row=5, column=0, columnspan=4, sticky='we', padx=10, pady=(2, 0))
+        ttk.Label(self.tg_model_row, text='模型', style='Panel.TLabel').pack(side='left')
+        self.tg_model_combo = ttk.Combobox(self.tg_model_row, width=40, state='readonly')
+        self.tg_model_combo.pack(side='left', padx=(6, 6))
+        ttk.Button(self.tg_model_row, text='刷新', width=4, command=self._tg_refresh_models).pack(side='left')
+
+        self.tg_hint_var = tk.StringVar(value='')
+        self.tg_hint_lbl = ttk.Label(tab_textgen, textvariable=self.tg_hint_var, style='Dim.TLabel')
+        self.tg_hint_lbl.grid(row=6, column=0, columnspan=4, sticky='w', padx=10, pady=(6, 4))
         tab_textgen.columnconfigure(1, weight=1)
+        self._tg_mode_changed()
 
 
         # 广域网（Tailscale 远程访问 / 一键复原）
@@ -2621,6 +2640,33 @@ class App:
             self.log(f'{node} 提交失败: {e}')
 
     # ---------- 傻酒馆 text-generation-webui ----------
+    def _tg_mode_changed(self):
+        m = self.tg_mode_var.get()
+        if m == 'remote':
+            self.tg_hint_var.set('复用模式：启动后在网页 Model 页 API type 选 OpenAI，URL 填 http://127.0.0.1:%d/v1，点 Connect（不重复加载模型）' % PORT_LLM)
+            self.tg_model_row.grid_remove()
+        else:
+            self.tg_hint_var.set('本地模式：启动时用 --model 加载所选模型到显存；请先在下方刷新并选一个 models/ 下的模型')
+            self.tg_model_row.grid()
+            self._tg_refresh_models()
+
+    def _tg_refresh_models(self):
+        d = self.textgen_dir_var.get().strip()
+        root = os.path.join(d, 'models') if d else ''
+        items = []
+        if os.path.isdir(root):
+            for name in sorted(os.listdir(root)):
+                p = os.path.join(root, name)
+                if os.path.isdir(p) or name.lower().endswith(('.gguf', '.bin', '.safetensors')):
+                    items.append(name)
+        cur = self.tg_model_combo.get()
+        self.tg_model_combo['values'] = items
+        if cur in items:
+            self.tg_model_combo.set(cur)
+        elif items:
+            self.tg_model_combo.set(items[0])
+
+    # ---------- 傻酒馆 text-generation-webui ----------
     def _browse_textgen_dir(self):
         try:
             import tkinter.filedialog as fd
@@ -2643,7 +2689,8 @@ class App:
         py = os.path.join(d, 'installer_files', 'env', 'python.exe')
         if not os.path.isfile(py):
             py = 'python'
-        self.log('启动傻酒馆 ...')
+        self._tg_py = py
+        self.log('启动傻酒馆（模式: %s）...' % ('复用llama-server' if self.tg_mode_var.get() == 'remote' else '本地模型'))
         threading.Thread(target=lambda: self._start_textgen_worker(d, py, server_py), daemon=True).start()
 
     def _start_textgen_worker(self, d, py, server_py):
@@ -2651,6 +2698,10 @@ class App:
             os.makedirs(os.path.dirname(TEXTGEN_LOG), exist_ok=True)
             lf = io.open(TEXTGEN_LOG, 'a', encoding='utf-8', errors='replace', buffering=1)
             cmd = [py, server_py, '--listen-port', str(TEXTGEN_PORT), '--listen', '0.0.0.0']
+            if self.tg_mode_var.get() == 'local':
+                mdl = self.tg_model_combo.get().strip()
+                if mdl:
+                    cmd += ['--model', mdl]
             subprocess.Popen(cmd, cwd=d, stdout=lf, stderr=subprocess.STDOUT, creationflags=0x08000000)
             self.log('傻酒馆后台启动中（日志 textgen.log）...')
         except Exception as e:

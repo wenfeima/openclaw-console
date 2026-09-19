@@ -2868,8 +2868,10 @@ class App:
         if not os.path.isfile(server_py):
             messagebox.showwarning('傻酒馆', '目录下找不到 server.py，确认是 text-generation-webui 根目录')
             return
-        # 选解释器：优先自带 installer_files/env/python.exe，其次系统 python
+        # 选解释器：优先 installer_files/env/python.exe，其次 portable_env/python.exe，最后系统 python
         py = os.path.join(d, 'installer_files', 'env', 'python.exe')
+        if not os.path.isfile(py):
+            py = os.path.join(d, 'portable_env', 'python.exe')
         if not os.path.isfile(py):
             py = 'python'
         self._tg_py = py

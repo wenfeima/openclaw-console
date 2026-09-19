@@ -984,7 +984,7 @@ class App:
                         command=self._tg_mode_changed).pack(side='left')
 
         # 本地模型选择行（仅本地模式可见）
-        self.tg_model_row = tk.Frame(tab_textgen, style='Panel.TFrame')
+        self.tg_model_row = tk.Frame(tab_textgen, bg='#383838')
         self.tg_model_row.grid(row=5, column=0, columnspan=4, sticky='we', padx=10, pady=(2, 0))
         ttk.Label(self.tg_model_row, text='模型', style='Panel.TLabel').pack(side='left')
         self.tg_model_combo = ttk.Combobox(self.tg_model_row, width=40, state='readonly')

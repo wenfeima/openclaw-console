@@ -2882,7 +2882,7 @@ class App:
         try:
             os.makedirs(os.path.dirname(TEXTGEN_LOG), exist_ok=True)
             lf = io.open(TEXTGEN_LOG, 'a', encoding='utf-8', errors='replace', buffering=1)
-            cmd = [py, server_py, '--listen-port', str(TEXTGEN_PORT), '--listen', '0.0.0.0']
+            cmd = [py, server_py, '--listen', '--listen-host', '0.0.0.0', '--listen-port', str(TEXTGEN_PORT)]
             if self.tg_mode_var.get() == 'local':
                 mdl = self.tg_model_combo.get().strip()
                 if mdl:

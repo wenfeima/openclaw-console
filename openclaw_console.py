@@ -107,6 +107,9 @@ TEXTGEN_PY    = os.path.join(TEXTGEN_DIR, 'installer_files', 'env', 'python.exe'
 PORT_LLM      = 8080
 PORT_GW       = 18789
 TEXTGEN_PORT  = 7861
+ST_DIR        = r'L:\SillyTavern-1.11.5整合包\SillyTavern-1.11.5'
+ST_PORT       = 8000
+ST_LOG        = os.path.join(_BASE_DIR, 'logs', 'sillytavern.log')
 TEXTGEN_LOG   = os.path.join(_BASE_DIR, 'logs', 'textgen.log')
 DASH_URL      = f'http://127.0.0.1:{PORT_GW}/'
 STARTUP_DIR   = os.path.join(os.environ['APPDATA'], r'Microsoft\Windows\Start Menu\Programs\Startup')
@@ -430,6 +433,14 @@ def textgen_alive():
     if http_ok(f'http://127.0.0.1:{TEXTGEN_PORT}/', timeout=5):
         return True
     return get_port_pid(TEXTGEN_PORT) is not None
+
+def st_alive():
+    try:
+        if http_ok(f'http://127.0.0.1:{ST_PORT}/', timeout=5):
+            return True
+    except Exception:
+        pass
+    return get_port_pid(ST_PORT) is not None
 
 import ctypes as _ct
 
@@ -972,6 +983,9 @@ class App:
         self.btn_textgen_stop.pack(side='left', padx=(8, 0))
         ttk.Button(tg_row, text='\U0001f595 打开界面', width=10, command=self.open_textgen).pack(side='left', padx=(8, 0))
         ttk.Button(tg_row, text='\U0001f4c1 文件夹', width=10, command=self.open_textgen_dir).pack(side='left', padx=(8, 0))
+        ttk.Separator(tg_row, orient='vertical').pack(side='left', fill='y', padx=8)
+        ttk.Button(tg_row, text='\U0001f3e8 酒馆前端', width=10, command=self.start_sillytavern).pack(side='left')
+        ttk.Button(tg_row, text='\U0001f5d4 停前端', width=10, command=self.stop_sillytavern).pack(side='left', padx=(8, 0))
 
         # 模式切换行
         mode_row = tk.Frame(tab_textgen, bg='#383838')
@@ -2889,10 +2903,10 @@ class App:
     def _start_textgen_worker(self, d, py, server_py):
         try:
             os.makedirs(os.path.dirname(TEXTGEN_LOG), exist_ok=True)
-            # 确保 user_data/models 目录存在（新版 textgen 启动会扫）
+            # 确保 user_data 下 textgen 需要的子目录都存在
             ud = os.path.join(d, 'user_data')
-            os.makedirs(os.path.join(ud, 'models'), exist_ok=True)
-            os.makedirs(os.path.join(ud, 'loras'), exist_ok=True)
+            for sub in ['models', 'loras', 'characters', 'prompts', 'instruction-notebooks', 'stories', 'history']:
+                os.makedirs(os.path.join(ud, sub), exist_ok=True)
             lf = io.open(TEXTGEN_LOG, 'a', encoding='utf-8', errors='replace', buffering=1)
             cmd = [py, server_py, '--listen', '--listen-host', '0.0.0.0', '--listen-port', str(TEXTGEN_PORT)]
             if self.tg_mode_var.get() == 'local':
@@ -2946,6 +2960,55 @@ class App:
         d = self.textgen_dir_var.get().strip()
         if os.path.isdir(d):
             webbrowser.open(d)
+
+    def start_sillytavern(self):
+        if st_alive():
+            self.log('SillyTavern 已在运行 http://127.0.0.1:%d' % ST_PORT)
+            webbrowser.open('http://127.0.0.1:%d/' % ST_PORT)
+            return
+        if not os.path.isfile(os.path.join(ST_DIR, 'server.js')):
+            messagebox.showwarning('SillyTavern', '找不到 %s\\server.js' % ST_DIR)
+            return
+        try:
+            os.makedirs(os.path.dirname(ST_LOG), exist_ok=True)
+            lf = io.open(ST_LOG, 'a', encoding='utf-8', errors='replace', buffering=1)
+            env = os.environ.copy()
+            env['NODE_ENV'] = 'production'
+            # 优先用整合包自带的 node
+            node_exe = 'node'
+            for cand in [r'L:\SillyTavern-1.11.5整合包\SillyTavern-1.11.5\node.exe',
+                         r'L:\SillyTavern-1.11.5整合包\node.exe']:
+                if os.path.isfile(cand):
+                    node_exe = cand
+                    break
+            subprocess.Popen([node_exe, 'server.js'], cwd=ST_DIR, stdout=lf, stderr=subprocess.STDOUT,
+                             env=env, creationflags=0x08000000)
+            self.log('SillyTavern 启动中（日志 logs/sillytavern.log）...')
+        except Exception as e:
+            self.log('SillyTavern 启动失败: ' + str(e))
+            return
+        # 等待就绪
+        for i in range(30):
+            time.sleep(2)
+            if st_alive():
+                self.log('✅ SillyTavern 就绪 http://127.0.0.1:%d' % ST_PORT)
+                webbrowser.open('http://127.0.0.1:%d/' % ST_PORT)
+                return
+        self.log('⚠ SillyTavern 60秒未就绪，查看 logs/sillytavern.log')
+
+    def stop_sillytavern(self):
+        pid = get_port_pid(ST_PORT)
+        if pid:
+            try:
+                os.kill(pid, 9)
+                self.log('已停止 SillyTavern（PID %d）' % pid)
+            except Exception as e:
+                self.log('停止失败: ' + str(e))
+        else:
+            self.log('SillyTavern 未在运行（%d 未监听）' % ST_PORT)
+
+    def open_sillytavern(self):
+        webbrowser.open('http://127.0.0.1:%d/' % ST_PORT)
 
     def restart_comfy(self):
         self.log('重启 ComfyUI ...')

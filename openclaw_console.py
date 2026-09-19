@@ -2855,6 +2855,14 @@ class App:
             d = fd.askdirectory(initialdir=self.textgen_dir_var.get() or 'L:\\')
             if d:
                 self.textgen_dir_var.set(d)
+                # 自动写回 paths.json
+                try:
+                    p = _load_paths()
+                    p['textgen_dir'] = d
+                    _save_paths(p)
+                    self.log('傻酒馆目录已保存: ' + d)
+                except Exception as se:
+                    self.log('保存目录失败: ' + str(se))
         except Exception as e:
             self.log('浏览目录失败: ' + str(e))
 
@@ -2881,13 +2889,21 @@ class App:
     def _start_textgen_worker(self, d, py, server_py):
         try:
             os.makedirs(os.path.dirname(TEXTGEN_LOG), exist_ok=True)
+            # 确保 user_data/models 目录存在（新版 textgen 启动会扫）
+            ud = os.path.join(d, 'user_data')
+            os.makedirs(os.path.join(ud, 'models'), exist_ok=True)
+            os.makedirs(os.path.join(ud, 'loras'), exist_ok=True)
             lf = io.open(TEXTGEN_LOG, 'a', encoding='utf-8', errors='replace', buffering=1)
             cmd = [py, server_py, '--listen', '--listen-host', '0.0.0.0', '--listen-port', str(TEXTGEN_PORT)]
             if self.tg_mode_var.get() == 'local':
                 mdl = self.tg_model_combo.get().strip()
                 if mdl:
                     cmd += ['--model', mdl]
-            subprocess.Popen(cmd, cwd=d, stdout=lf, stderr=subprocess.STDOUT, creationflags=0x08000000)
+            env = os.environ.copy()
+            env['PYTHONIOENCODING'] = 'utf-8'
+            env['PYTHONUTF8'] = '1'
+            subprocess.Popen(cmd, cwd=d, stdout=lf, stderr=subprocess.STDOUT,
+                             env=env, creationflags=0x08000000)
             self._start_tail(TEXTGEN_LOG, 'textgen')
             self.log('傻酒馆后台启动中（日志在「日志→傻酒馆」页签）...')
         except Exception as e:

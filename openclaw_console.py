@@ -1004,7 +1004,7 @@ class App:
         ttk.Entry(self.tg_api_row, textvariable=self.tg_api_key_var, width=24, show='*').pack(side='left', padx=(6, 8))
         ttk.Label(self.tg_api_row, text='模型', style='Panel.TLabel').pack(side='left')
         self.tg_api_model_var = tk.StringVar(value=_PATHS.get('textgen_api_model', 'gpt-4o-mini'))
-        ttk.Entry(self.tg_api_model_var, textvariable=self.tg_api_model_var, width=18).pack(side='left', padx=(6, 0))
+        ttk.Entry(self.tg_api_row, textvariable=self.tg_api_model_var, width=18).pack(side='left', padx=(6, 0))
 
         self.tg_hint_var = tk.StringVar(value='')
         self.tg_hint_lbl = ttk.Label(tab_textgen, textvariable=self.tg_hint_var, style='Dim.TLabel')

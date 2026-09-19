@@ -981,6 +981,8 @@ class App:
         ttk.Radiobutton(mode_row, text='复用 llama-server', value='remote', variable=self.tg_mode_var,
                         command=self._tg_mode_changed).pack(side='left', padx=(4, 12))
         ttk.Radiobutton(mode_row, text='本地加载模型', value='local', variable=self.tg_mode_var,
+                        command=self._tg_mode_changed).pack(side='left', padx=(0, 12))
+        ttk.Radiobutton(mode_row, text='在线 API', value='online', variable=self.tg_mode_var,
                         command=self._tg_mode_changed).pack(side='left')
 
         # 本地模型选择行（仅本地模式可见）
@@ -990,6 +992,19 @@ class App:
         self.tg_model_combo = ttk.Combobox(self.tg_model_row, width=40, state='readonly')
         self.tg_model_combo.pack(side='left', padx=(6, 6))
         ttk.Button(self.tg_model_row, text='刷新', width=4, command=self._tg_refresh_models).pack(side='left')
+
+        # 在线 API 配置行
+        self.tg_api_row = tk.Frame(tab_textgen, bg='#383838')
+        self.tg_api_row.grid(row=5, column=0, columnspan=4, sticky='we', padx=10, pady=(2, 0))
+        ttk.Label(self.tg_api_row, text='API 地址', style='Panel.TLabel').pack(side='left')
+        self.tg_api_url_var = tk.StringVar(value=_PATHS.get('textgen_api_url', 'https://api.openai.com/v1'))
+        ttk.Entry(self.tg_api_row, textvariable=self.tg_api_url_var, width=32).pack(side='left', padx=(6, 8))
+        ttk.Label(self.tg_api_row, text='Key', style='Panel.TLabel').pack(side='left')
+        self.tg_api_key_var = tk.StringVar(value=_PATHS.get('textgen_api_key', ''))
+        ttk.Entry(self.tg_api_row, textvariable=self.tg_api_key_var, width=24, show='*').pack(side='left', padx=(6, 8))
+        ttk.Label(self.tg_api_row, text='模型', style='Panel.TLabel').pack(side='left')
+        self.tg_api_model_var = tk.StringVar(value=_PATHS.get('textgen_api_model', 'gpt-4o-mini'))
+        ttk.Entry(self.tg_api_model_var, textvariable=self.tg_api_model_var, width=18).pack(side='left', padx=(6, 0))
 
         self.tg_hint_var = tk.StringVar(value='')
         self.tg_hint_lbl = ttk.Label(tab_textgen, textvariable=self.tg_hint_var, style='Dim.TLabel')
@@ -2642,13 +2657,18 @@ class App:
     # ---------- 傻酒馆 text-generation-webui ----------
     def _tg_mode_changed(self):
         m = self.tg_mode_var.get()
+        # 默认全部隐藏
+        self.tg_model_row.grid_remove()
+        self.tg_api_row.grid_remove()
         if m == 'remote':
             self.tg_hint_var.set('复用模式：启动后在网页 Model 页 API type 选 OpenAI，URL 填 http://127.0.0.1:%d/v1，点 Connect（不重复加载模型）' % PORT_LLM)
-            self.tg_model_row.grid_remove()
-        else:
-            self.tg_hint_var.set('本地模式：启动时用 --model 加载所选模型到显存；请先在下方刷新并选一个 models/ 下的模型')
+        elif m == 'local':
+            self.tg_hint_var.set('本地模式：启动时用 --model 加载所选模型到显存；请先刷新并选一个 models/ 下的模型')
             self.tg_model_row.grid()
             self._tg_refresh_models()
+        else:
+            self.tg_hint_var.set('在线模式：填 API 地址/Key/模型名；启动后在网页 Model 页 API type 选 OpenAI，粘贴以下配置即可（首次配置后 textgen 会记住）')
+            self.tg_api_row.grid()
 
     def _tg_refresh_models(self):
         d = self.textgen_dir_var.get().strip()
@@ -2690,7 +2710,8 @@ class App:
         if not os.path.isfile(py):
             py = 'python'
         self._tg_py = py
-        self.log('启动傻酒馆（模式: %s）...' % ('复用llama-server' if self.tg_mode_var.get() == 'remote' else '本地模型'))
+        mode = self.tg_mode_var.get()
+        self.log('启动傻酒馆（模式: %s）...' % {'remote':'复用llama-server','local':'本地模型','online':'在线API'}[mode])
         threading.Thread(target=lambda: self._start_textgen_worker(d, py, server_py), daemon=True).start()
 
     def _start_textgen_worker(self, d, py, server_py):
@@ -2707,10 +2728,25 @@ class App:
         except Exception as e:
             self.log('傻酒馆启动失败: ' + str(e))
             return
+        mode = self.tg_mode_var.get()
         for i in range(90):
             time.sleep(2)
             if textgen_alive():
                 self.log('✅ 傻酒馆就绪 http://127.0.0.1:%d' % TEXTGEN_PORT)
+                if mode == 'online':
+                    url = self.tg_api_url_var.get().strip()
+                    key = self.tg_api_key_var.get().strip()
+                    mdl = self.tg_api_model_var.get().strip()
+                    self.log('→ 在线API：网页 Model 页 API type 选 OpenAI，填 URL=%s Key=%s Model=%s' % (url, (key[:6]+'...' if key else '(空)'), mdl))
+                    try:
+                        with io.open(_PATHS_CFG, 'r', encoding='utf-8') as f:
+                            _p = json.load(f)
+                    except Exception:
+                        _p = {}
+                    _p['textgen_api_url'] = url
+                    _p['textgen_api_key'] = key
+                    _p['textgen_api_model'] = mdl
+                    _save_paths(_p)
                 return
         self.log('⚠ 傻酒馆 180 秒未就绪，请查看 textgen.log')
 

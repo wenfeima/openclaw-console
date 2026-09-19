@@ -1017,6 +1017,21 @@ class App:
         ttk.Button(st_row, text='\U0001f310 打开页面', width=10, command=self.open_sillytavern).pack(side='left', padx=(8, 0))
         self.st_info = tk.StringVar(value='未运行')
         ttk.Label(st_row, textvariable=self.st_info, style='Dim.TLabel').pack(side='left', padx=(12, 0))
+
+        # 后端模式切换
+        backend_row = tk.Frame(tab_textgen, bg='#383838')
+        backend_row.grid(row=4, column=0, columnspan=4, sticky='we', padx=10, pady=(4, 6))
+        ttk.Label(backend_row, text='后端模式：', style='Panel.TLabel').pack(side='left')
+        self.st_backend_var = tk.StringVar(value='local')
+        ttk.Radiobutton(backend_row, text='本地 llama-server (8080)', value='local', variable=self.st_backend_var).pack(side='left', padx=(4, 12))
+        ttk.Radiobutton(backend_row, text='在线 API', value='online', variable=self.st_backend_var).pack(side='left', padx=(0, 12))
+        ttk.Label(backend_row, text='API 地址:', style='Panel.TLabel').pack(side='left')
+        self.st_api_url_var = tk.StringVar(value=_PATHS.get('st_online_api_url', 'https://api.openai.com/v1'))
+        ttk.Entry(backend_row, textvariable=self.st_api_url_var, width=28).pack(side='left', padx=(4, 4))
+        ttk.Label(backend_row, text='Key:', style='Panel.TLabel').pack(side='left')
+        self.st_api_key_var = tk.StringVar(value=_PATHS.get('st_online_api_key', ''))
+        ttk.Entry(backend_row, textvariable=self.st_api_key_var, width=20, show='*').pack(side='left', padx=(4, 4))
+        ttk.Button(backend_row, text='保存', width=6, command=self._save_st_backend).pack(side='left', padx=(4, 0))
         # 隐藏 textgen 后端 UI（不用了，只留酒馆前端）
         try:
             self._tg_dir_lbl.grid_remove()
@@ -3062,6 +3077,20 @@ class App:
 
     def open_sillytavern(self):
         webbrowser.open('http://127.0.0.1:%d/' % ST_PORT)
+
+    def _save_st_backend(self):
+        '''保存酒馆后端模式配置'''
+        try:
+            import json as _json
+            p = os.path.join(_BASE_DIR, 'paths.json')
+            cfg = _json.load(open(p, 'r', encoding='utf-8')) if os.path.isfile(p) else {}
+            cfg['st_backend'] = self.st_backend_var.get()
+            cfg['st_online_api_url'] = self.st_api_url_var.get().strip()
+            cfg['st_online_api_key'] = self.st_api_key_var.get().strip()
+            _json.dump(cfg, open(p, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
+            self.log('✅ 酒馆后端配置已保存: ' + self.st_backend_var.get())
+        except Exception as e:
+            self.log('保存失败: ' + str(e))
 
     def restart_comfy(self):
         self.log('重启 ComfyUI ...')

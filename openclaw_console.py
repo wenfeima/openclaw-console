@@ -1018,7 +1018,11 @@ class App:
         self.tg_profiles_tree.column('url', width=280, anchor='w')
         self.tg_profiles_tree.column('model', width=140, anchor='w')
         self.tg_profiles_tree.pack(side='left', fill='x', expand=True)
+        self.tg_profiles_scroll = ttk.Scrollbar(tree_row, orient='vertical', command=self.tg_profiles_tree.yview)
+        self.tg_profiles_tree.configure(yscrollcommand=self.tg_profiles_scroll.set)
+        self.tg_profiles_scroll.pack(side='left', fill='y')
         self.tg_profiles_tree.bind('<Double-1>', lambda e: self._tg_load_profile())
+        ttk.Button(tree_row, text='删除选中', width=8, command=self._tg_profile_delete).pack(side='left', padx=(6, 0))
 
         # 按钮行
         btn_row = tk.Frame(tab_textgen, bg='#383838')

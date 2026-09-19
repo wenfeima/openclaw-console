@@ -2580,6 +2580,7 @@ class App:
         alias = 'local-model'
         cmd = [LLAMA_SERVER, '-m', path, '-ngl', ngl, '-c', ctx,
                '--host', '0.0.0.0', '--port', str(PORT_LLM), '--alias', alias,
+               '--chat-template', 'chatml',
                '--reasoning', 'off', '--cache-type-k', 'q8_0', '--cache-type-v', 'q8_0']
         if mmproj:
             cmd += ['--mmproj', mmproj]

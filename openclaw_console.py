@@ -2743,14 +2743,19 @@ class App:
             self.log('保存失败: ' + str(e))
 
     def _tg_api_test(self):
-        import urllib.request, json as _json
         url = self.tg_api_url_var.get().strip().rstrip('/')
         key = self.tg_api_key_var.get().strip()
         mdl = self.tg_api_model_var.get().strip()
         if not url or not key or not mdl:
             self.log('⚠️ API 地址 / Key / 模型 都要填')
+            from tkinter import messagebox as _mb
+            _mb.showwarning('在线API测试', 'API 地址 / Key / 模型 都要填')
             return
         self.log('测试在线API: %s 模型=%s ...' % (url, mdl))
+        threading.Thread(target=self._tg_api_test_worker, args=(url, key, mdl), daemon=True).start()
+
+    def _tg_api_test_worker(self, url, key, mdl):
+        import urllib.request, json as _json
         body = _json.dumps({
             'model': mdl,
             'messages': [{'role': 'user', 'content': 'ping'}],
@@ -2762,12 +2767,16 @@ class App:
             headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key},
             method='POST')
         try:
-            with urllib.request.urlopen(req, timeout=20) as r:
+            with urllib.request.urlopen(req, timeout=30) as r:
                 data = _json.loads(r.read().decode('utf-8'))
                 msg = data.get('choices', [{}])[0].get('message', {}).get('content', '')
                 self.log('✅ API 正常，回复: ' + str(msg)[:80])
+                from tkinter import messagebox as _mb
+                self.root.after(0, lambda: _mb.showinfo('在线API测试', '✅ 连接正常\n模型回复: ' + str(msg)[:100]))
         except Exception as e:
             self.log('❌ API 测试失败: ' + str(e))
+            from tkinter import messagebox as _mb
+            self.root.after(0, lambda: _mb.showerror('在线API测试', '❌ 失败: ' + str(e)[:200]))
 
     def _tg_mode_changed(self):
         m = self.tg_mode_var.get()

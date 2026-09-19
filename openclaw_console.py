@@ -1025,7 +1025,11 @@ class App:
         btn_row.grid(row=7, column=0, columnspan=4, sticky='we', padx=10, pady=(4, 0))
         ttk.Button(btn_row, text='测试连接', width=10, command=self._tg_api_test).pack(side='left', padx=(0, 6))
         ttk.Button(btn_row, text='保存到表格', width=10, command=self._tg_api_save).pack(side='left', padx=(0, 6))
-        ttk.Button(btn_row, text='删除选中', width=10, command=self._tg_profile_delete).pack(side='left')
+        ttk.Button(btn_row, text='删除选中', width=10, command=self._tg_profile_delete).pack(side='left', padx=(0, 20))
+        ttk.Label(btn_row, text='测试状态:', style='Dim.TLabel').pack(side='left')
+        self._tg_lamp = tk.Canvas(btn_row, width=16, height=16, bg='#383838', highlightthickness=0)
+        self._tg_lamp.pack(side='left', padx=(4, 0))
+        self._tg_set_lamp('gray', '未测试')
 
         self.tg_hint_var = tk.StringVar(value='')
         self.tg_hint_lbl = ttk.Label(tab_textgen, textvariable=self.tg_hint_var, style='Dim.TLabel')
@@ -2742,6 +2746,36 @@ class App:
         except Exception as e:
             self.log('保存失败: ' + str(e))
 
+    def _tg_set_lamp(self, color, tip=''):
+        c = {'green': '#4caf50', 'red': '#e53935', 'yellow': '#ffc107', 'gray': '#666666'}.get(color, '#666666')
+        try:
+            self._tg_lamp.delete('all')
+            self._tg_lamp.create_oval(2, 2, 14, 14, fill=c, outline='')
+            self._tg_lamp.configure(cursor='question' if tip else '')
+            if tip:
+                self._tg_lamp.bind('<Enter>', lambda e: self._lamp_tip(tip))
+                self._tg_lamp.bind('<Leave>', lambda e: self._lamp_tip(''))
+        except Exception:
+            pass
+
+    def _lamp_tip(self, text):
+        # 简单 tooltip：用一个 Toplevel 浮层
+        try:
+            if not text:
+                if hasattr(self, '_tip_win') and self._tip_win:
+                    self._tip_win.destroy(); self._tip_win = None
+                return
+            if hasattr(self, '_tip_win') and self._tip_win:
+                self._tip_win.destroy()
+            x = self._tg_lamp.winfo_rootx() + 10
+            y = self._tg_lamp.winfo_rooty() + 20
+            self._tip_win = tw = tk.Toplevel(self.root)
+            tw.wm_overrideredirect(True)
+            tw.wm_geometry('+%d+%d' % (x, y))
+            tk.Label(tw, text=text, bg='#222', fg='#eee', padx=6, pady=2, font=('Microsoft YaHei UI', 9)).pack()
+        except Exception:
+            pass
+
     def _tg_api_test(self):
         url = self.tg_api_url_var.get().strip().rstrip('/')
         key = self.tg_api_key_var.get().strip()
@@ -2752,6 +2786,7 @@ class App:
             _mb.showwarning('在线API测试', 'API 地址 / Key / 模型 都要填')
             return
         self.log('测试在线API: %s 模型=%s ...' % (url, mdl))
+        self._tg_set_lamp('yellow', '测试中...')
         threading.Thread(target=self._tg_api_test_worker, args=(url, key, mdl), daemon=True).start()
 
     def _tg_api_test_worker(self, url, key, mdl):
@@ -2771,12 +2806,10 @@ class App:
                 data = _json.loads(r.read().decode('utf-8'))
                 msg = data.get('choices', [{}])[0].get('message', {}).get('content', '')
                 self.log('✅ API 正常，回复: ' + str(msg)[:80])
-                from tkinter import messagebox as _mb
-                self.root.after(0, lambda: _mb.showinfo('在线API测试', '✅ 连接正常\n模型回复: ' + str(msg)[:100]))
+                self.root.after(0, lambda: self._tg_set_lamp('green', '正常'))
         except Exception as e:
             self.log('❌ API 测试失败: ' + str(e))
-            from tkinter import messagebox as _mb
-            self.root.after(0, lambda: _mb.showerror('在线API测试', '❌ 失败: ' + str(e)[:200]))
+            self.root.after(0, lambda: self._tg_set_lamp('red', str(e)[:60]))
 
     def _tg_mode_changed(self):
         m = self.tg_mode_var.get()

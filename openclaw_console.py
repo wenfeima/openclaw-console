@@ -1004,9 +1004,7 @@ class App:
         ttk.Entry(self.tg_api_row, textvariable=self.tg_api_key_var, width=24, show='*').pack(side='left', padx=(6, 8))
         ttk.Label(self.tg_api_row, text='模型', style='Panel.TLabel').pack(side='left')
         self.tg_api_model_var = tk.StringVar(value=_PATHS.get('textgen_api_model', 'gpt-4o-mini'))
-        ttk.Entry(self.tg_api_row, textvariable=self.tg_api_model_var, width=18).pack(side='left', padx=(6, 8))
-        ttk.Button(self.tg_api_row, text='测试', width=5, command=self._tg_api_test).pack(side='left', padx=(0, 4))
-        ttk.Button(self.tg_api_row, text='保存', width=5, command=self._tg_api_save).pack(side='left')
+        ttk.Entry(self.tg_api_row, textvariable=self.tg_api_model_var, width=18).pack(side='left', padx=(6, 0))
 
         # 已保存配置表格
         tree_row = tk.Frame(tab_textgen, bg='#383838')
@@ -1021,11 +1019,17 @@ class App:
         self.tg_profiles_tree.column('model', width=140, anchor='w')
         self.tg_profiles_tree.pack(side='left', fill='x', expand=True)
         self.tg_profiles_tree.bind('<Double-1>', lambda e: self._tg_load_profile())
-        ttk.Button(tree_row, text='删除选中', width=8, command=self._tg_profile_delete).pack(side='left', padx=(6, 0))
+
+        # 按钮行
+        btn_row = tk.Frame(tab_textgen, bg='#383838')
+        btn_row.grid(row=7, column=0, columnspan=4, sticky='we', padx=10, pady=(4, 0))
+        ttk.Button(btn_row, text='测试连接', width=10, command=self._tg_api_test).pack(side='left', padx=(0, 6))
+        ttk.Button(btn_row, text='保存到表格', width=10, command=self._tg_api_save).pack(side='left', padx=(0, 6))
+        ttk.Button(btn_row, text='删除选中', width=10, command=self._tg_profile_delete).pack(side='left')
 
         self.tg_hint_var = tk.StringVar(value='')
         self.tg_hint_lbl = ttk.Label(tab_textgen, textvariable=self.tg_hint_var, style='Dim.TLabel')
-        self.tg_hint_lbl.grid(row=7, column=0, columnspan=4, sticky='w', padx=10, pady=(6, 4))
+        self.tg_hint_lbl.grid(row=8, column=0, columnspan=4, sticky='w', padx=10, pady=(6, 4))
         tab_textgen.columnconfigure(1, weight=1)
         self._tg_mode_changed()
 

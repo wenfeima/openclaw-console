@@ -983,9 +983,6 @@ class App:
         self.btn_textgen_stop.pack(side='left', padx=(8, 0))
         ttk.Button(tg_row, text='\U0001f595 打开界面', width=10, command=self.open_textgen).pack(side='left', padx=(8, 0))
         ttk.Button(tg_row, text='\U0001f4c1 文件夹', width=10, command=self.open_textgen_dir).pack(side='left', padx=(8, 0))
-        ttk.Separator(tg_row, orient='vertical').pack(side='left', fill='y', padx=8)
-        ttk.Button(tg_row, text='\U0001f3e8 酒馆前端', width=10, command=self.start_sillytavern).pack(side='left')
-        ttk.Button(tg_row, text='\U0001f5d4 停前端', width=10, command=self.stop_sillytavern).pack(side='left', padx=(8, 0))
 
         # 模式切换行
         mode_row = tk.Frame(tab_textgen, bg='#383838')
@@ -999,9 +996,19 @@ class App:
         ttk.Radiobutton(mode_row, text='在线 API', value='online', variable=self.tg_mode_var,
                         command=self._tg_mode_changed).pack(side='left')
 
+        # SillyTavern 前端行
+        st_row = tk.Frame(tab_textgen, bg='#383838')
+        st_row.grid(row=5, column=0, columnspan=4, sticky='we', padx=10, pady=(4, 6))
+        ttk.Label(st_row, text='酒馆前端：', style='Panel.TLabel').pack(side='left')
+        ttk.Button(st_row, text='\U0001f3e8 启动酒馆', width=10, style='Accent.TButton', command=self.start_sillytavern).pack(side='left', padx=(4, 6))
+        ttk.Button(st_row, text='\U0001f5d4 停止', width=10, command=self.stop_sillytavern).pack(side='left', padx=(0, 6))
+        ttk.Button(st_row, text='\U0001f310 打开页面', width=10, command=self.open_sillytavern).pack(side='left', padx=(0, 6))
+        self.st_info = tk.StringVar(value='未运行')
+        ttk.Label(st_row, textvariable=self.st_info, style='Dim.TLabel').pack(side='left', padx=(12, 0))
+
         # 本地模型选择行（仅本地模式可见）
         self.tg_model_row = tk.Frame(tab_textgen, bg='#383838')
-        self.tg_model_row.grid(row=5, column=0, columnspan=4, sticky='we', padx=10, pady=(2, 0))
+        self.tg_model_row.grid(row=6, column=0, columnspan=4, sticky='we', padx=10, pady=(2, 0))
         ttk.Label(self.tg_model_row, text='模型', style='Panel.TLabel').pack(side='left')
         self.tg_model_combo = ttk.Combobox(self.tg_model_row, width=40, state='readonly')
         self.tg_model_combo.pack(side='left', padx=(6, 6))
@@ -3505,6 +3512,11 @@ class App:
                 tg_on = textgen_alive()
             self._set_lamp(self.lamp_textgen, tg_on)
             self.textgen_info.set('运行中 · http://127.0.0.1:%d' % TEXTGEN_PORT if tg_on else '未运行')
+            try:
+                st_on = st_alive()
+                self.st_info.set('运行中 · http://127.0.0.1:%d' % ST_PORT if st_on else '未运行')
+            except Exception:
+                pass
 
     def on_close(self):
         self._polling = False

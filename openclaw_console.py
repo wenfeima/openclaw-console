@@ -107,7 +107,7 @@ TEXTGEN_PY    = os.path.join(TEXTGEN_DIR, 'installer_files', 'env', 'python.exe'
 PORT_LLM      = 8080
 PORT_GW       = 18789
 TEXTGEN_PORT  = 7861
-ST_DIR        = r'L:\SillyTavern-1.11.5整合包\SillyTavern-1.11.5'
+ST_DIR        = _PATHS.get('sillytavern_dir', r'L:\SillyTavern-1.11.5整合包\SillyTavern-1.11.5')
 ST_PORT       = 8000
 ST_LOG        = os.path.join(_BASE_DIR, 'logs', 'sillytavern.log')
 TEXTGEN_LOG   = os.path.join(_BASE_DIR, 'logs', 'textgen.log')
@@ -957,7 +957,7 @@ class App:
         # ----- Tab：傻酒馆 text-generation-webui -----
         tab_textgen = ttk.Frame(nb, style='Panel.TFrame')
         nb.add(tab_textgen, text=' 傻酒馆 ')
-        ttk.Label(tab_textgen, text='傻酒馆服务（text-generation-webui）', style='Panel.TLabel',
+        ttk.Label(tab_textgen, text='SillyTavern 酒馆前端', style='Panel.TLabel',
                   font=('Microsoft YaHei UI', 11, 'bold')).grid(row=0, column=0, columnspan=4, sticky='w', padx=10, pady=(14, 6))
 
         # 状态行
@@ -968,15 +968,19 @@ class App:
         self.textgen_info = tk.StringVar(value='未运行')
         ttk.Label(st_row, textvariable=self.textgen_info, style='Dim.TLabel').pack(side='left')
 
-        # 路径行
-        ttk.Label(tab_textgen, text='安装目录', style='Panel.TLabel').grid(row=2, column=0, sticky='w', padx=(10, 4), pady=4)
+        # 路径行（隐藏，不用textgen后端）
+        self._tg_dir_lbl = ttk.Label(tab_textgen, text='安装目录', style='Panel.TLabel')
+        self._tg_dir_lbl.grid(row=2, column=0, sticky='w', padx=(10, 4), pady=4)
         self.textgen_dir_var = tk.StringVar(value=TEXTGEN_DIR)
-        ttk.Entry(tab_textgen, textvariable=self.textgen_dir_var, width=46).grid(row=2, column=1, columnspan=2, sticky='we', padx=4, pady=4)
-        ttk.Button(tab_textgen, text='浏览…', width=6, command=lambda: self._browse_textgen_dir()).grid(row=2, column=3, sticky='we', padx=(0, 10), pady=4)
+        self._tg_dir_entry = ttk.Entry(tab_textgen, textvariable=self.textgen_dir_var, width=46)
+        self._tg_dir_entry.grid(row=2, column=1, columnspan=2, sticky='we', padx=4, pady=4)
+        self._tg_dir_btn = ttk.Button(tab_textgen, text='浏览…', command=lambda: self._browse_textgen_dir())
+        self._tg_dir_btn.grid(row=2, column=3, sticky='we', padx=(0, 10), pady=4)
 
-        # 按钮行
+        # 按钮行（隐藏）
         tg_row = tk.Frame(tab_textgen, bg='#383838')
         tg_row.grid(row=3, column=0, columnspan=4, sticky='we', padx=10, pady=(4, 6))
+        self._tg_row = tg_row
         self.btn_textgen_start = ttk.Button(tg_row, text='\u25b6 启动', width=10, style='Accent.TButton', command=self.start_textgen)
         self.btn_textgen_start.pack(side='left')
         self.btn_textgen_stop = ttk.Button(tg_row, text='\u25a0 停止', width=10, style='Stop.TButton', command=self.stop_textgen)
@@ -987,6 +991,7 @@ class App:
         # 模式切换行
         mode_row = tk.Frame(tab_textgen, bg='#383838')
         mode_row.grid(row=4, column=0, columnspan=4, sticky='we', padx=10, pady=(4, 2))
+        self._mode_row = mode_row
         ttk.Label(mode_row, text='模式：', style='Panel.TLabel').pack(side='left')
         self.tg_mode_var = tk.StringVar(value='remote')
         ttk.Radiobutton(mode_row, text='复用 llama-server', value='remote', variable=self.tg_mode_var,
@@ -996,19 +1001,42 @@ class App:
         ttk.Radiobutton(mode_row, text='在线 API', value='online', variable=self.tg_mode_var,
                         command=self._tg_mode_changed).pack(side='left')
 
-        # SillyTavern 前端行
+        # SillyTavern 目录行
+        st_dir_row = tk.Frame(tab_textgen, bg='#383838')
+        st_dir_row.grid(row=2, column=0, columnspan=4, sticky='we', padx=10, pady=(4, 0))
+        ttk.Label(st_dir_row, text='酒馆目录', style='Panel.TLabel').pack(side='left')
+        self.st_dir_var = tk.StringVar(value=ST_DIR)
+        ttk.Entry(st_dir_row, textvariable=self.st_dir_var, width=50).pack(side='left', padx=(6, 4))
+        ttk.Button(st_dir_row, text='浏览…', width=6, command=self._browse_st_dir).pack(side='left')
+
+        # SillyTavern 按钮行
         st_row = tk.Frame(tab_textgen, bg='#383838')
-        st_row.grid(row=5, column=0, columnspan=4, sticky='we', padx=10, pady=(4, 6))
-        ttk.Label(st_row, text='酒馆前端：', style='Panel.TLabel').pack(side='left')
-        ttk.Button(st_row, text='\U0001f3e8 启动酒馆', width=10, style='Accent.TButton', command=self.start_sillytavern).pack(side='left', padx=(4, 6))
-        ttk.Button(st_row, text='\U0001f5d4 停止', width=10, command=self.stop_sillytavern).pack(side='left', padx=(0, 6))
-        ttk.Button(st_row, text='\U0001f310 打开页面', width=10, command=self.open_sillytavern).pack(side='left', padx=(0, 6))
+        st_row.grid(row=3, column=0, columnspan=4, sticky='we', padx=10, pady=(4, 6))
+        ttk.Button(st_row, text='\U0001f3e8 启动酒馆', width=10, style='Accent.TButton', command=self.start_sillytavern).pack(side='left')
+        ttk.Button(st_row, text='\U0001f5d4 停止', width=10, command=self.stop_sillytavern).pack(side='left', padx=(8, 0))
+        ttk.Button(st_row, text='\U0001f310 打开页面', width=10, command=self.open_sillytavern).pack(side='left', padx=(8, 0))
         self.st_info = tk.StringVar(value='未运行')
         ttk.Label(st_row, textvariable=self.st_info, style='Dim.TLabel').pack(side='left', padx=(12, 0))
+        # 隐藏 textgen 后端 UI（不用了，只留酒馆前端）
+        try:
+            self._tg_dir_lbl.grid_remove()
+            self._tg_dir_entry.grid_remove()
+            self._tg_dir_btn.grid_remove()
+            self._tg_row.grid_remove()
+            self._mode_row.grid_remove()
+            self.tg_model_row.grid_remove()
+            if hasattr(self, 'tg_api_row'):
+                self.tg_api_row.grid_remove()
+            if hasattr(self, '_tg_table_row'):
+                self._tg_table_row.grid_remove()
+            if hasattr(self, '_tg_btn_row'):
+                self._tg_btn_row.grid_remove()
+        except Exception as e:
+            self.log('隐藏textgen UI: ' + str(e))
 
         # 本地模型选择行（仅本地模式可见）
         self.tg_model_row = tk.Frame(tab_textgen, bg='#383838')
-        self.tg_model_row.grid(row=6, column=0, columnspan=4, sticky='we', padx=10, pady=(2, 0))
+        self.tg_model_row.grid(row=7, column=0, columnspan=4, sticky='we', padx=10, pady=(2, 0))
         ttk.Label(self.tg_model_row, text='模型', style='Panel.TLabel').pack(side='left')
         self.tg_model_combo = ttk.Combobox(self.tg_model_row, width=40, state='readonly')
         self.tg_model_combo.pack(side='left', padx=(6, 6))
@@ -2969,12 +2997,13 @@ class App:
             webbrowser.open(d)
 
     def start_sillytavern(self):
+        d = self.st_dir_var.get().strip()
         if st_alive():
             self.log('SillyTavern 已在运行 http://127.0.0.1:%d' % ST_PORT)
             webbrowser.open('http://127.0.0.1:%d/' % ST_PORT)
             return
-        if not os.path.isfile(os.path.join(ST_DIR, 'server.js')):
-            messagebox.showwarning('SillyTavern', '找不到 %s\\server.js' % ST_DIR)
+        if not d or not os.path.isfile(os.path.join(d, 'server.js')):
+            messagebox.showwarning('SillyTavern', '找不到目录下的 server.js，确认是 SillyTavern 根目录')
             return
         try:
             os.makedirs(os.path.dirname(ST_LOG), exist_ok=True)
@@ -2988,7 +3017,7 @@ class App:
                 if os.path.isfile(cand):
                     node_exe = cand
                     break
-            subprocess.Popen([node_exe, 'server.js'], cwd=ST_DIR, stdout=lf, stderr=subprocess.STDOUT,
+            subprocess.Popen([node_exe, 'server.js'], cwd=d, stdout=lf, stderr=subprocess.STDOUT,
                              env=env, creationflags=0x08000000)
             self.log('SillyTavern 启动中（日志 logs/sillytavern.log）...')
         except Exception as e:
@@ -3002,6 +3031,22 @@ class App:
                 webbrowser.open('http://127.0.0.1:%d/' % ST_PORT)
                 return
         self.log('⚠ SillyTavern 60秒未就绪，查看 logs/sillytavern.log')
+
+    def _browse_st_dir(self):
+        try:
+            import tkinter.filedialog as fd
+            d = fd.askdirectory(initialdir=self.st_dir_var.get() or 'L:\\')
+            if d:
+                self.st_dir_var.set(d)
+                try:
+                    p = _load_paths()
+                    p['sillytavern_dir'] = d
+                    _save_paths(p)
+                    self.log('SillyTavern 目录已保存: ' + d)
+                except Exception as se:
+                    self.log('保存目录失败: ' + str(se))
+        except Exception as e:
+            self.log('浏览目录失败: ' + str(e))
 
     def stop_sillytavern(self):
         pid = get_port_pid(ST_PORT)

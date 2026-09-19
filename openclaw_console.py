@@ -662,7 +662,7 @@ class App:
         self.log_win = None
         self._log_win_text = None
         self._log_buffer = []
-        self._log_buffers = {'console': [], 'llm': [], 'comfy': [], 'gw': []}
+        self._log_buffers = {'console': [], 'llm': [], 'comfy': [], 'gw': [], 'textgen': []}
         self._log_texts = {}
         self._tail_pos = {}
         self._tails_on = True
@@ -952,7 +952,7 @@ class App:
         # 状态行
         st_row = tk.Frame(tab_textgen, bg='#383838')
         st_row.grid(row=1, column=0, columnspan=4, sticky='we', padx=10, pady=(0, 8))
-        self.lamp_textgen = tk.Canvas(st_row, width=12, height=12, bg='#383838', highlightthickness=0)
+        self.lamp_textgen = tk.Canvas(st_row, width=16, height=16, bg='#383838', highlightthickness=0)
         self.lamp_textgen.pack(side='left', padx=(2, 6))
         self.textgen_info = tk.StringVar(value='未运行')
         ttk.Label(st_row, textvariable=self.textgen_info, style='Dim.TLabel').pack(side='left')
@@ -1231,7 +1231,7 @@ class App:
         with log_lock:
             bufs = getattr(self, '_log_buffers', None)
             if bufs is None:
-                self._log_buffers = {'console': [], 'llm': [], 'comfy': [], 'gw': []}
+                self._log_buffers = {'console': [], 'llm': [], 'comfy': [], 'gw': [], 'textgen': []}
                 bufs = self._log_buffers
             buf = bufs.setdefault(key, [])
             buf.append(line)
@@ -1260,7 +1260,8 @@ class App:
     def _set_lamp(self, canvas, on, color=None):
         canvas.delete('all')
         fill = color if color else (self.colors['green'] if on else self.colors['red'])
-        canvas.create_oval(2, 2, 14, 14, fill=fill, outline='')
+        w = int(canvas['width'])
+        canvas.create_oval(1, 1, w-1, w-1, fill=fill, outline='#111', width=1)
 
     # ---------- 环境体检 ----------
     def _refresh_env(self):
@@ -1569,7 +1570,7 @@ class App:
         nb = ttk.Notebook(win)
         nb.pack(fill='both', expand=True, padx=8, pady=8)
         self._log_texts = {}
-        for key, label in [('console', '控制台'), ('llm', '模型 LLM'), ('comfy', 'ComfyUI'), ('gw', '网关')]:
+        for key, label in [('console', '控制台'), ('llm', '模型 LLM'), ('comfy', 'ComfyUI'), ('gw', '网关'), ('textgen', '傻酒馆')]:
             page = tk.Frame(nb, bg='#1e1e1e')
             t = tk.Text(page, bg='#1e1e1e', fg='#c8c8c8', font=('Consolas', 9),
                         wrap='word', relief='flat', borderwidth=0, state='disabled')
@@ -2608,6 +2609,7 @@ class App:
         self._start_tail(LLAMA_LOG, 'llm')
         self._start_tail(COMFY_LOG, 'comfy')
         self._start_tail(GATEWAY_LOG, 'gw')
+        self._start_tail(TEXTGEN_LOG, 'textgen')
 
     def _wait_llm_ready(self):
         for _ in range(180):
@@ -2885,7 +2887,8 @@ class App:
                 if mdl:
                     cmd += ['--model', mdl]
             subprocess.Popen(cmd, cwd=d, stdout=lf, stderr=subprocess.STDOUT, creationflags=0x08000000)
-            self.log('傻酒馆后台启动中（日志 textgen.log）...')
+            self._start_tail(TEXTGEN_LOG, 'textgen')
+            self.log('傻酒馆后台启动中（日志在「日志→傻酒馆」页签）...')
         except Exception as e:
             self.log('傻酒馆启动失败: ' + str(e))
             return

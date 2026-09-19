@@ -1004,11 +1004,28 @@ class App:
         ttk.Entry(self.tg_api_row, textvariable=self.tg_api_key_var, width=24, show='*').pack(side='left', padx=(6, 8))
         ttk.Label(self.tg_api_row, text='模型', style='Panel.TLabel').pack(side='left')
         self.tg_api_model_var = tk.StringVar(value=_PATHS.get('textgen_api_model', 'gpt-4o-mini'))
-        ttk.Entry(self.tg_api_row, textvariable=self.tg_api_model_var, width=18).pack(side='left', padx=(6, 0))
+        ttk.Entry(self.tg_api_row, textvariable=self.tg_api_model_var, width=18).pack(side='left', padx=(6, 8))
+        ttk.Button(self.tg_api_row, text='测试', width=5, command=self._tg_api_test).pack(side='left', padx=(0, 4))
+        ttk.Button(self.tg_api_row, text='保存', width=5, command=self._tg_api_save).pack(side='left')
+
+        # 已保存配置表格
+        tree_row = tk.Frame(tab_textgen, bg='#383838')
+        tree_row.grid(row=6, column=0, columnspan=4, sticky='we', padx=10, pady=(4, 0))
+        cols = ('name', 'url', 'model')
+        self.tg_profiles_tree = ttk.Treeview(tree_row, columns=cols, show='headings', height=4)
+        self.tg_profiles_tree.heading('name', text='名称')
+        self.tg_profiles_tree.heading('url', text='API 地址')
+        self.tg_profiles_tree.heading('model', text='模型')
+        self.tg_profiles_tree.column('name', width=180, anchor='w')
+        self.tg_profiles_tree.column('url', width=280, anchor='w')
+        self.tg_profiles_tree.column('model', width=140, anchor='w')
+        self.tg_profiles_tree.pack(side='left', fill='x', expand=True)
+        self.tg_profiles_tree.bind('<Double-1>', lambda e: self._tg_load_profile())
+        ttk.Button(tree_row, text='删除选中', width=8, command=self._tg_profile_delete).pack(side='left', padx=(6, 0))
 
         self.tg_hint_var = tk.StringVar(value='')
         self.tg_hint_lbl = ttk.Label(tab_textgen, textvariable=self.tg_hint_var, style='Dim.TLabel')
-        self.tg_hint_lbl.grid(row=6, column=0, columnspan=4, sticky='w', padx=10, pady=(6, 4))
+        self.tg_hint_lbl.grid(row=7, column=0, columnspan=4, sticky='w', padx=10, pady=(6, 4))
         tab_textgen.columnconfigure(1, weight=1)
         self._tg_mode_changed()
 
@@ -2655,6 +2672,99 @@ class App:
             self.log(f'{node} 提交失败: {e}')
 
     # ---------- 傻酒馆 text-generation-webui ----------
+    def _tg_refresh_profiles(self):
+        for i in self.tg_profiles_tree.get_children():
+            self.tg_profiles_tree.delete(i)
+        p = _load_paths()
+        for x in p.get('textgen_api_profiles', []):
+            self.tg_profiles_tree.insert('', 'end', values=(x.get('name', ''), x.get('url', ''), x.get('model', '')))
+
+    def _tg_load_profile(self):
+        sel = self.tg_profiles_tree.selection()
+        if not sel:
+            return
+        vals = self.tg_profiles_tree.item(sel[0], 'values')
+        name = vals[0]
+        p = _load_paths()
+        for x in p.get('textgen_api_profiles', []):
+            if x.get('name') == name:
+                self.tg_api_url_var.set(x.get('url', ''))
+                self.tg_api_key_var.set(x.get('key', ''))
+                self.tg_api_model_var.set(x.get('model', ''))
+                self.log('已加载配置: %s（双击行后填到上方输入框）' % name)
+                return
+
+    def _tg_profile_delete(self):
+        sel = self.tg_profiles_tree.selection()
+        if not sel:
+            self.log('请先在表格里选中一行')
+            return
+        name = self.tg_profiles_tree.item(sel[0], 'values')[0]
+        p = _load_paths()
+        p['textgen_api_profiles'] = [x for x in p.get('textgen_api_profiles', []) if x.get('name') != name]
+        _save_paths(p)
+        self._tg_refresh_profiles()
+        self.log('已删除配置: %s' % name)
+
+    def _tg_api_save(self):
+        try:
+            p = _load_paths()
+            url = self.tg_api_url_var.get().strip()
+            key = self.tg_api_key_var.get().strip()
+            mdl = self.tg_api_model_var.get().strip()
+            # 用域名+模型名作为 profile 名
+            try:
+                dom = url.replace('https://', '').replace('http://', '').split('/')[0]
+            except Exception:
+                dom = url
+            name = dom + ' / ' + mdl
+            profs = p.get('textgen_api_profiles', [])
+            replaced = False
+            for i, x in enumerate(profs):
+                if x.get('name') == name:
+                    profs[i] = {'name': name, 'url': url, 'key': key, 'model': mdl}
+                    replaced = True
+                    break
+            if not replaced:
+                profs.append({'name': name, 'url': url, 'key': key, 'model': mdl})
+            p['textgen_api_profiles'] = profs
+            # 同时同步默认三字段（兼容旧逻辑）
+            p['textgen_api_url'] = url
+            p['textgen_api_key'] = key
+            p['textgen_api_model'] = mdl
+            _save_paths(p)
+            self._tg_refresh_profiles()
+            self.log('✅ 已保存为配置: %s' % name)
+        except Exception as e:
+            self.log('保存失败: ' + str(e))
+
+    def _tg_api_test(self):
+        import urllib.request, json as _json
+        url = self.tg_api_url_var.get().strip().rstrip('/')
+        key = self.tg_api_key_var.get().strip()
+        mdl = self.tg_api_model_var.get().strip()
+        if not url or not key or not mdl:
+            self.log('⚠️ API 地址 / Key / 模型 都要填')
+            return
+        self.log('测试在线API: %s 模型=%s ...' % (url, mdl))
+        body = _json.dumps({
+            'model': mdl,
+            'messages': [{'role': 'user', 'content': 'ping'}],
+            'max_tokens': 5,
+        }).encode('utf-8')
+        req = urllib.request.Request(
+            url + '/chat/completions',
+            data=body,
+            headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key},
+            method='POST')
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:
+                data = _json.loads(r.read().decode('utf-8'))
+                msg = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+                self.log('✅ API 正常，回复: ' + str(msg)[:80])
+        except Exception as e:
+            self.log('❌ API 测试失败: ' + str(e))
+
     def _tg_mode_changed(self):
         m = self.tg_mode_var.get()
         # 默认全部隐藏
@@ -2669,6 +2779,7 @@ class App:
         else:
             self.tg_hint_var.set('在线模式：填 API 地址/Key/模型名；启动后在网页 Model 页 API type 选 OpenAI，粘贴以下配置即可（首次配置后 textgen 会记住）')
             self.tg_api_row.grid()
+            self._tg_refresh_profiles()
 
     def _tg_refresh_models(self):
         d = self.textgen_dir_var.get().strip()
